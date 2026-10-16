@@ -20,6 +20,20 @@ libgit2, so it runs natively on Apple Silicon (and Windows).
 - Open a repository from the menu (⌘O), by dropping a folder onto the window, from the recent
   list, or from the command line: `dagscape /path/to/repo`.
 
+## Command line (macOS)
+
+Choose **Dagscape → Install Command Line Tools…** to put a `dagscape` command in
+`/usr/local/bin` (a symlink to the app; it asks for an administrator password when the
+directory is not writable). Install it again after moving the app.
+
+```bash
+dagscape              # open the repository that contains the current directory
+dagscape ~/src/repo   # open another repository
+dagscape --license    # print the licenses of Dagscape and the libraries it bundles
+```
+
+Each call opens a new window, because a Dagscape process shows one repository.
+
 ## Keyboard
 
 | Key | Action |
@@ -48,6 +62,7 @@ pnpm tauri dev          # run the app with hot reload
 pnpm check              # svelte-check
 cd src-tauri && cargo test
 pnpm tauri build        # release bundle
+pnpm notices            # regenerate THIRD-PARTY-NOTICES.txt
 ```
 
 ## Release
@@ -58,4 +73,15 @@ notarized universal dmg for macOS and an NSIS installer for Windows and publishe
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
+
+## Third-party licenses
+
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) lists the libraries bundled into the app
+(JavaScript packages, Rust crates and the native libraries they ship, such as libgit2) with their
+license texts. In the app, open it from **Dagscape → Third-Party Licenses** on macOS or
+**Help → Third-Party Licenses** on Windows, or run `dagscape --license`.
+
+Regenerate it with `pnpm notices` after adding or upgrading a dependency. It needs
+[cargo-about](https://github.com/EmbarkStudios/cargo-about) at the version pinned in
+`scripts/generate-third-party-notices.sh`.

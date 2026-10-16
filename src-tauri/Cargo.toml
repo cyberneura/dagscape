@@ -1,6 +1,6 @@
 [package]
 name = "dagscape"
-version = "0.1.0"
+version = "0.2.0"
 description = "Dagscape - a branch graph browser for Git"
 authors = ["ytyng"]
 license = "MIT"
