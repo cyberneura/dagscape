@@ -1,0 +1,30 @@
+# cargo-about の設定。scripts/generate-third-party-notices.sh が読む。
+#
+# 配布物に入る crate だけを対象にする: ビルド時・テスト時だけの依存と、配布しない
+# ターゲット (Linux) にしか入らない crate は除く。配布しているのは macOS の universal dmg
+# (aarch64 + x86_64) と Windows の NSIS インストーラー (x86_64) で、どちらも既定の feature
+# (.github/workflows/release.yml)。
+#
+# dagscape 自身を `[private] ignore` で落とさないのは、publish = false の package を全部
+# 落とすので、vendored やフォークした第三者の crate まで黙って消えるから。自分の crate は
+# 生成スクリプトが workspace_members の名前で落とす。
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "0BSD",
+    "MIT-0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
+workarounds = ["ring", "rustls"]

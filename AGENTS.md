@@ -16,6 +16,7 @@ tagline.
 dagscape/
 ├── src/
 │   ├── routes/+page.svelte        # App shell: toolbar, sidebar, list, detail; keyboard; store
+│   ├── routes/licenses/           # Third-Party Licenses window (prerendered for WebviewUrl::App)
 │   └── lib/
 │       ├── api.ts                 # Typed invoke() wrappers and the IPC types
 │       ├── rowCache.ts            # Chunked (256 rows) cache of commit rows fetched over IPC
@@ -25,6 +26,8 @@ dagscape/
 │       └── RefSidebar.svelte      # Branches / remotes / tags
 └── src-tauri/src/
     ├── lib.rs                     # Tauri commands, app state (one open repository), menu
+    ├── cli.rs                     # `dagscape` command (symlink in /usr/local/bin), --license
+    ├── notices_tests.rs           # THIRD-PARTY-NOTICES.txt is in step with the lockfiles
     ├── repo.rs                    # git2: refs, revwalk, rows, commit detail, file diff, search
     ├── graph.rs                   # Lane layout (pure, unit-tested, no git dependency)
     └── watcher.rs                 # notify watcher on .git → "repo-changed" event
@@ -57,6 +60,7 @@ All rows live in the Rust side (`AppState.session.graph`); the webview keeps at 
 - `search_commits(query)` → row indices
 - `row_index_of(oid)` → index or null
 - `initial_path()` → the CLI argument, once
+- `third_party_notices()` → Dagscape's LICENSE followed by THIRD-PARTY-NOTICES.txt (embedded)
 
 Events emitted to the webview: `repo-changed` (watcher), `menu` (payload: `open-repo`,
 `reload-repo`, `find`).
@@ -81,9 +85,17 @@ pnpm build                         # frontend only (needed before cargo test: ta
 cd src-tauri && cargo test         # Rust unit tests (graph layout, repo access, watcher filter)
 pnpm tauri build                   # release bundle
 pnpm tauri build --debug --bundles app   # quick .app for manual testing
-pnpm tauri icon path/to/icon.png   # regenerate icons
+pnpm notices                       # regenerate THIRD-PARTY-NOTICES.txt (`--check` in CI)
 pnpm release [patch|minor|major]   # bump version, push, watch the release workflow
 ```
+
+## Command line
+
+Install Command Line Tools… (macOS app menu) symlinks `/usr/local/bin/dagscape` to the app's
+executable. Started through a symlink, `run()` acts as a client instead of the GUI: it resolves
+the path against the caller's directory and starts the app with `open -n` (one process per
+repository; the bare executable would tie the GUI to the terminal). `dagscape --license` prints
+the licenses in either mode.
 
 Launch with a repository from the shell: `src-tauri/target/debug/bundle/macos/Dagscape.app/Contents/MacOS/dagscape /path/to/repo`.
 
@@ -95,9 +107,34 @@ published Release yet (test → build matrix macOS universal dmg / Windows NSIS 
 builds need the `APPLE_*` repository secrets (Developer ID certificate + notarization). The
 Homebrew cask lives in `cyberneura/homebrew-tap` and updates itself from the latest Release.
 
+## Third-party licenses
+
+`scripts/generate-third-party-notices.sh` (`pnpm notices`) writes THIRD-PARTY-NOTICES.txt from
+what actually ships: the client bundle's modules (vite.config.js `listBundledModules`, enabled by
+the script), cargo-about for the release targets (`src-tauri/about.toml`), and native libraries
+shipped by `-sys` crates (vendored libgit2; zlib and the WebView2 loader on Windows). Texts that a
+package does not ship live in `vendor-licenses/<name>@<version>/`, copied from that version's
+upstream. **Re-run it and commit the result whenever a dependency is added or upgraded**; the
+tests in `notices_tests.rs` and the CI `--check` fail otherwise. A new `-sys` crate, an unknown
+virtual module, or a version bump of a vendored package stops the script until it is checked.
+
+## App icon
+
+Masters are in `resources/app-icons/` (`dagscape-favicon.png` full-bleed, `dagscape-mac-icon.png`
+with a 10% margin). `pnpm tauri icon` writes `.icns` smallest-first, which 1Password's dialogs show
+blurred, so rebuild it largest-first afterwards and drop the mobile icons:
+
+```bash
+pnpm tauri icon "$PWD/resources/app-icons/dagscape-favicon.png"
+python3 ~/workspace/astragal/resources/app-icons/build_icns.py \
+  resources/app-icons/dagscape-mac-icon.png src-tauri/icons/icon.icns
+rm -rf src-tauri/icons/android src-tauri/icons/ios
+```
+
 ## Testing
 
 - `src-tauri/src/graph.rs` tests cover the lane algorithm with small synthetic DAGs.
+- `src-tauri/src/cli.rs` tests cover argument parsing and the quoting of the install script.
 - `src-tauri/src/repo.rs` tests build a real repository with the `git` CLI in a temp directory
   (needs `git` on PATH).
 - The UI has no automated tests; verify by launching the app against a real repository.

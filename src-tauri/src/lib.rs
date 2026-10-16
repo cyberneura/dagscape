@@ -1,4 +1,7 @@
+mod cli;
 mod graph;
+#[cfg(test)]
+mod notices_tests;
 mod repo;
 mod watcher;
 
@@ -9,7 +12,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder};
 
 use repo::{CommitDetail, FileDiff, Graph, HeadInfo, RefInfo, Row};
 
@@ -165,11 +168,50 @@ fn initial_path(state: State<'_, AppState>) -> Option<String> {
         .take()
 }
 
+#[tauri::command]
+fn third_party_notices() -> String {
+    cli::license_text()
+}
+
+/// メニュー項目の id と、Third-Party Licenses のウインドウの label
+const LICENSES_ID: &str = "licenses";
+#[cfg(target_os = "macos")]
+const MENU_INSTALL_CLI: &str = "install-cli";
+
+/// 開いていれば前面に出す。閉じると破棄されるので、開くたびに作り直す
+fn show_licenses_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(LICENSES_ID) {
+        window.show()?;
+        return window.set_focus();
+    }
+    WebviewWindowBuilder::new(app, LICENSES_ID, WebviewUrl::App("licenses".into()))
+        .title("Third-Party Licenses")
+        .inner_size(720.0, 600.0)
+        .min_inner_size(400.0, 300.0)
+        .center()
+        .build()?;
+    Ok(())
+}
+
+/// 管理者のパスワードを尋ねることがあるので、メニューのイベントを処理するスレッドを塞がない
+#[cfg(target_os = "macos")]
+fn install_cli<R: Runtime>(app: AppHandle<R>) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    std::thread::spawn(move || {
+        let (kind, title, message) = match cli::install() {
+            Ok(installed) => (MessageDialogKind::Info, "Installed the dagscape command", installed),
+            Err(e) => (MessageDialogKind::Error, "Failed to install the dagscape command", e),
+        };
+        app.dialog().message(message).title(title).kind(kind).show(|_| {});
+    });
+}
+
 const MENU_OPEN: &str = "open-repo";
 const MENU_RELOAD: &str = "reload-repo";
 const MENU_FIND: &str = "find";
 
 /// 既定メニューの File に Open / Reload / Find を足す。File が無いプラットフォームでは先頭に File を作る。
+/// Third-Party Licenses は macOS ではアプリメニューの About の直下、ほかでは Help の About の直下。
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let open = MenuItem::with_id(app, MENU_OPEN, "Open Repository…", true, Some("CmdOrCtrl+O"))?;
     let reload = MenuItem::with_id(app, MENU_RELOAD, "Reload", true, Some("CmdOrCtrl+R"))?;
@@ -192,11 +234,43 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             menu.insert(&file, 0)?;
         }
     }
+
+    let licenses = MenuItem::with_id(app, LICENSES_ID, "Third-Party Licenses", true, None::<&str>)?;
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::menu::PredefinedMenuItem;
+        let install = MenuItem::with_id(
+            app,
+            MENU_INSTALL_CLI,
+            "Install Command Line Tools…",
+            true,
+            None::<&str>,
+        )?;
+        // Menu::default はアプリメニューを先頭に置き、その 0 番目が About
+        if let Some(app_menu) = menu.items()?.first().and_then(|item| item.as_submenu().cloned()) {
+            app_menu.insert(&licenses, 1)?;
+            app_menu.insert(&PredefinedMenuItem::separator(app)?, 2)?;
+            app_menu.insert(&install, 3)?;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        match menu.get(tauri::menu::HELP_SUBMENU_ID).and_then(|item| item.as_submenu().cloned()) {
+            Some(help) => help.append(&licenses)?,
+            None => menu.append(&Submenu::with_items(app, "Help", true, &[&licenses])?)?,
+        }
+    }
     Ok(menu)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if cli::invoked_via_symlink() {
+        std::process::exit(cli::run_client());
+    }
+    if let Some(code) = cli::print_license_if_requested() {
+        std::process::exit(code);
+    }
     // Finder から起動すると -psn_... のような引数が付くことがあるので、ダッシュ始まりは無視する
     let initial = std::env::args().nth(1).filter(|a| !a.starts_with('-'));
     let state = AppState {
@@ -214,6 +288,27 @@ pub fn run() {
             let id = event.id().as_ref();
             if matches!(id, MENU_OPEN | MENU_RELOAD | MENU_FIND) {
                 let _ = app.emit("menu", id.to_string());
+            } else if id == LICENSES_ID {
+                // メニューのハンドラーからウインドウを作ると Windows でデッドロックするので別スレッドで
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = show_licenses_window(&app) {
+                        eprintln!("dagscape: failed to show the licenses window: {e}");
+                    }
+                });
+            } else {
+                #[cfg(target_os = "macos")]
+                if id == MENU_INSTALL_CLI {
+                    install_cli(app.clone());
+                }
+            }
+        })
+        // licenses が残るとアプリが終了しないので、main と一緒に閉じる
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(licenses) = window.app_handle().get_webview_window(LICENSES_ID) {
+                    let _ = licenses.close();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -226,6 +321,7 @@ pub fn run() {
             search_commits,
             row_index_of,
             initial_path,
+            third_party_notices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,6 @@
 {
   "name": "dagscape",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Dagscape - a branch graph browser for Git",
   "type": "module",
   "scripts": {
@@ -11,7 +11,8 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "release": "bash scripts/release.sh",
-    "prepare": "svelte-kit sync || echo ''"
+    "prepare": "svelte-kit sync || echo ''",
+    "notices": "bash scripts/generate-third-party-notices.sh"
   },
   "license": "MIT",
   "dependencies": {

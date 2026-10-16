@@ -1,0 +1,5 @@
+# アプリに include_str! で埋め込むライセンス本文。Windows の autocrlf で CRLF にすると、
+# 配布物の本文と生成スクリプトの出力 (--check) が環境で変わる
+LICENSE text eol=lf
+THIRD-PARTY-NOTICES.txt text eol=lf
+vendor-licenses/** text eol=lf

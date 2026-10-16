@@ -192,6 +192,19 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
+      # 依存を上げて THIRD-PARTY-NOTICES.txt を作り直し忘れたら落とす。cargo-about は version で
+      # 出力の書式が変わるので、生成スクリプトに固定した version を入れる。生成は配布ターゲット
+      # すべてを解決するので、1 つのランナーで足りる
+      - name: Install cargo-about
+        if: runner.os == 'macOS'
+        run: |
+          version=$(sed -n 's/^CARGO_ABOUT_VERSION=//p' scripts/generate-third-party-notices.sh)
+          cargo install cargo-about --version "$version" --locked --features cli
+
+      - name: Check THIRD-PARTY-NOTICES.txt
+        if: runner.os == 'macOS'
+        run: bash scripts/generate-third-party-notices.sh --check
+
       - name: Cargo test
         run: cargo test
         working-directory: src-tauri
