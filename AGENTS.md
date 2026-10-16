@@ -93,7 +93,7 @@ Same scheme as `ytyng/arcvault`: `.github/workflows/release.yml` runs on every p
 reads the version from `src-tauri/tauri.conf.json`, and releases only if `v<version>` is not a
 published Release yet (test → build matrix macOS universal dmg / Windows NSIS → publish). macOS
 builds need the `APPLE_*` repository secrets (Developer ID certificate + notarization). The
-Homebrew cask lives in `ytyng/homebrew-tap` and updates itself from the latest Release.
+Homebrew cask lives in `cyberneura/homebrew-tap` and updates itself from the latest Release.
 
 ## Testing
 

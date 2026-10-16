@@ -35,10 +35,10 @@ libgit2, so it runs natively on Apple Silicon (and Windows).
 ## Install
 
 ```bash
-brew install --cask ytyng/tap/dagscape
+brew install --cask cyberneura/tap/dagscape
 ```
 
-Or download the dmg from [Releases](https://github.com/ytyng/dagscape/releases).
+Or download the dmg from [Releases](https://github.com/cyberneura/dagscape/releases).
 
 ## Development
 
