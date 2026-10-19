@@ -8,13 +8,15 @@
     type RefLabel,
   } from "./api";
   import { formatDateTime } from "./format";
+  import { showLinkMenu, type GitHub, type LinkItem } from "./github";
 
   interface Props {
     oid: string | null;
     refs: RefLabel[];
+    github: GitHub;
     onjump: (oid: string) => void;
   }
-  let { oid, refs, onjump }: Props = $props();
+  let { oid, refs, github, onjump }: Props = $props();
 
   let detail = $state<CommitDetail | null>(null);
   let error = $state<string | null>(null);
@@ -110,6 +112,28 @@
     }
   }
 
+  // 削除されたファイル・削除行は、このコミットには無いので第 1 親の版を開く
+  function fileLinks(d: CommitDetail, file: FileChange, line?: DiffLine): LinkItem[] {
+    const parent = d.parents[0] ?? null;
+    const oldPath = file.old_path ?? file.path;
+    let blob: string | null;
+    let diffLine: { side: "L" | "R"; no: number } | undefined;
+    if (line?.kind === "del" && line.old_no !== null) {
+      blob = parent && github.fileUrl(parent, oldPath, line.old_no);
+      diffLine = { side: "L", no: line.old_no };
+    } else if (line && line.kind !== "hunk" && line.new_no !== null) {
+      blob = github.fileUrl(d.oid, file.path, line.new_no);
+      diffLine = { side: "R", no: line.new_no };
+    } else {
+      blob = file.status === "D" ? parent && github.fileUrl(parent, oldPath) : github.fileUrl(d.oid, file.path);
+    }
+    const at = diffLine ? ` at Line ${diffLine.no}` : "";
+    return [
+      { text: `Open File${at} on GitHub`, url: blob },
+      { text: `Open Diff${at} on GitHub`, url: github.available ? github.diffUrl(d.oid, file.path, diffLine) : null },
+    ];
+  }
+
   function signatureText(sig: CommitDetail["author"]): string {
     return `${sig.name} <${sig.email}> · ${formatDateTime(sig.time)}`;
   }
@@ -127,9 +151,21 @@
       class="selectable shrink-0 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700"
     >
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span class="font-mono text-xs text-neutral-500 dark:text-neutral-400">{detail.oid}</span>
+        <span
+          class="font-mono text-xs text-neutral-500 dark:text-neutral-400"
+          role="note"
+          oncontextmenu={(e) =>
+            detail && showLinkMenu(e, [{ text: "Open Commit on GitHub", url: github.commitUrl(detail.oid) }])}
+          >{detail.oid}</span
+        >
         {#each refs as ref (ref.kind + ref.name)}
-          <span class="chip {chipClass(ref)}">{ref.name}</span>
+          <span
+            class="chip {chipClass(ref)}"
+            role="note"
+            oncontextmenu={(e) =>
+              detail && showLinkMenu(e, [{ text: `Open ${ref.name} on GitHub`, url: github.refUrl(ref, detail.oid) }])}
+            >{ref.name}</span
+          >
         {/each}
       </div>
       <div
@@ -146,7 +182,9 @@
           {#each detail.parents as parent (parent)}
             <button
               class="mr-2 cursor-pointer font-mono text-sky-600 hover:underline dark:text-sky-400"
-              onclick={() => onjump(parent)}>{parent.slice(0, 7)}</button
+              onclick={() => onjump(parent)}
+              oncontextmenu={(e) => showLinkMenu(e, [{ text: "Open Commit on GitHub", url: github.commitUrl(parent) }])}
+              >{parent.slice(0, 7)}</button
             >
           {:else}
             <span class="text-neutral-400">(root commit)</span>
@@ -166,6 +204,7 @@
               ? 'bg-blue-500/25'
               : 'hover:bg-neutral-500/10'}"
             onclick={() => (selectedFile = file)}
+            oncontextmenu={(e) => detail && showLinkMenu(e, fileLinks(detail, file))}
             title={file.old_path ? `${file.old_path} → ${file.path}` : file.path}
           >
             <span class="w-3 shrink-0 font-mono text-xs {statusClass(file.status)}">{file.status}</span>
@@ -195,7 +234,10 @@
           <table class="w-full border-collapse">
             <tbody>
               {#each diff.lines as line, i (i)}
-                <tr class={lineClass(line.kind)}>
+                <tr
+                  class={lineClass(line.kind)}
+                  oncontextmenu={(e) => detail && selectedFile && showLinkMenu(e, fileLinks(detail, selectedFile, line))}
+                >
                   <td class="w-12 pr-1 text-right text-neutral-400 select-none">{line.old_no ?? ""}</td>
                   <td class="w-12 pr-2 text-right text-neutral-400 select-none">{line.new_no ?? ""}</td>
                   <td class="px-2 whitespace-pre"

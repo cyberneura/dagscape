@@ -2,10 +2,17 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type RefKind = "head" | "branch" | "remote" | "tag";
 
+/** For a remote ref, itself; for a local branch, its upstream. */
+export interface Tracking {
+  remote: string;
+  branch: string;
+}
+
 export interface RefLabel {
   name: string;
   kind: RefKind;
   is_head: boolean;
+  tracking: Tracking | null;
 }
 
 export interface RefInfo {
@@ -14,6 +21,12 @@ export interface RefInfo {
   kind: RefKind;
   oid: string;
   is_head: boolean;
+  tracking: Tracking | null;
+}
+
+export interface RemoteInfo {
+  name: string;
+  web_url: string | null;
 }
 
 export interface Segment {
@@ -50,6 +63,7 @@ export interface RepoSummary {
   max_lanes: number;
   refs: RefInfo[];
   head: HeadInfo | null;
+  remotes: RemoteInfo[];
   include_remotes: boolean;
   load_ms: number;
 }

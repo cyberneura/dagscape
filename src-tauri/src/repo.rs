@@ -4,9 +4,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use git2::{Commit, Delta, DiffFindOptions, DiffOptions, Oid, Repository, Sort};
+use git2::{Commit, Delta, DiffFindOptions, DiffOptions, Direction, Oid, Remote, Repository, Sort};
 use serde::Serialize;
 
+use crate::github;
 use crate::graph::{LayoutBuilder, Segment};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -19,11 +20,20 @@ pub enum RefKind {
     Tag,
 }
 
+/// リモート上のブランチ。remote 種別の ref ならそれ自身、ローカルブランチなら upstream。
+/// リモート名に "/" が入り得るので、"origin/feature" を分けたものをここで持たせる
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Tracking {
+    pub remote: String,
+    pub branch: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RefLabel {
     pub name: String,
     pub kind: RefKind,
     pub is_head: bool,
+    pub tracking: Option<Tracking>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -33,6 +43,14 @@ pub struct RefInfo {
     pub kind: RefKind,
     pub oid: String,
     pub is_head: bool,
+    pub tracking: Option<Tracking>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RemoteInfo {
+    pub name: String,
+    /// GitHub のリモートなら https://host/owner/repo
+    pub web_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +82,7 @@ pub struct Graph {
     pub index_by_oid: HashMap<String, usize>,
     pub refs: Vec<RefInfo>,
     pub head: Option<HeadInfo>,
+    pub remotes: Vec<RemoteInfo>,
     pub max_lanes: usize,
 }
 
@@ -145,6 +164,7 @@ pub fn load_graph(repo: &Repository, include_remotes: bool) -> Result<Graph, Str
     let mut walk = repo.revwalk().map_err(err)?;
     walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME).map_err(err)?;
 
+    let remotes = open_remotes(repo);
     let mut labels: HashMap<Oid, Vec<RefLabel>> = HashMap::new();
     let mut refs = Vec::new();
     for reference in repo.references().map_err(err)? {
@@ -166,10 +186,16 @@ pub fn load_graph(repo: &Repository, include_remotes: bool) -> Result<Graph, Str
         let Ok(commit) = reference.peel_to_commit() else { continue };
         let oid = commit.id();
         let is_head = kind == RefKind::Branch && head_branch.as_deref() == Some(full_name);
+        let tracking = match kind {
+            RefKind::Remote => remote_branch_of(&remotes, full_name),
+            RefKind::Branch => upstream_of(repo, &remotes, full_name),
+            _ => None,
+        };
         labels.entry(oid).or_default().push(RefLabel {
             name: name.to_string(),
             kind,
             is_head,
+            tracking: tracking.clone(),
         });
         refs.push(RefInfo {
             full_name: full_name.to_string(),
@@ -177,6 +203,7 @@ pub fn load_graph(repo: &Repository, include_remotes: bool) -> Result<Graph, Str
             kind,
             oid: oid.to_string(),
             is_head,
+            tracking,
         });
         walk.push(oid).map_err(err)?;
     }
@@ -188,6 +215,7 @@ pub fn load_graph(repo: &Repository, include_remotes: bool) -> Result<Graph, Str
                     name: "HEAD".to_string(),
                     kind: RefKind::Head,
                     is_head: true,
+                    tracking: None,
                 },
             );
             walk.push(oid).map_err(err)?;
@@ -242,7 +270,76 @@ pub fn load_graph(repo: &Repository, include_remotes: bool) -> Result<Graph, Str
         index_by_oid,
         refs,
         head,
+        remotes: remotes
+            .iter()
+            .filter_map(|r| {
+                Some(RemoteInfo {
+                    name: r.name().ok()??.to_string(),
+                    web_url: r.url().ok().and_then(github::web_url),
+                })
+            })
+            .collect(),
         max_lanes,
+    })
+}
+
+fn open_remotes(repo: &Repository) -> Vec<Remote<'_>> {
+    let Ok(names) = repo.remotes() else { return Vec::new() };
+    names
+        .iter()
+        .flatten()
+        .flatten()
+        .filter_map(|name| repo.find_remote(name).ok())
+        .collect()
+}
+
+/// "refs/remotes/origin/x" のリモート上の名前。fetch refspec を逆に当てて求める。
+/// リモート名に "/" が入ることも、refspec で別の名前に写していることもあるので、名前を切り分けない
+fn remote_branch_of(remotes: &[Remote<'_>], full_name: &str) -> Option<Tracking> {
+    remotes.iter().find_map(|remote| {
+        let spec = remote
+            .refspecs()
+            .find(|spec| spec.direction() == Direction::Fetch && spec.dst_matches(full_name))?;
+        let src = spec.rtransform(full_name).ok()?;
+        Some(Tracking {
+            remote: remote.name().ok()??.to_string(),
+            branch: src.as_str().ok()?.strip_prefix("refs/heads/")?.to_string(),
+        })
+    })
+}
+
+/// branch.<name>.remote / merge をそのまま読む。remote が "." (ローカルブランチを追跡) なら None。
+/// upstream を設定せずに push したブランチは、GitHub のリモートに同名のリモート追跡 ref が実在する時だけ
+/// (origin 優先) それとみなす。GitHub でないリモートを選んでもリンクを作れないので候補にしない。
+/// 実在を確かめずに同名を推測すると、未 push なら 404、別物の同名ブランチがあればそれを開いてしまう
+fn upstream_of(repo: &Repository, remotes: &[Remote<'_>], full_name: &str) -> Option<Tracking> {
+    let Ok(remote) = repo.branch_upstream_remote(full_name) else {
+        let branch = full_name.strip_prefix("refs/heads/")?;
+        let mut ordered: Vec<&Remote<'_>> = remotes
+            .iter()
+            .filter(|r| r.url().ok().and_then(github::web_url).is_some())
+            .collect();
+        ordered.sort_by_key(|r| r.name().ok().flatten() != Some("origin"));
+        return ordered.into_iter().find_map(|r| {
+            let spec = r
+                .refspecs()
+                .find(|spec| spec.direction() == Direction::Fetch && spec.src_matches(full_name))?;
+            let dst = spec.transform(full_name).ok()?;
+            repo.find_reference(dst.as_str().ok()?).ok()?;
+            Some(Tracking {
+                remote: r.name().ok()??.to_string(),
+                branch: branch.to_string(),
+            })
+        });
+    };
+    let remote = remote.as_str().ok()?;
+    if remote == "." {
+        return None;
+    }
+    let merge = repo.branch_upstream_merge(full_name).ok()?;
+    Some(Tracking {
+        remote: remote.to_string(),
+        branch: merge.as_str().ok()?.strip_prefix("refs/heads/")?.to_string(),
     })
 }
 
@@ -555,6 +652,49 @@ mod tests {
         assert!(graph.rows.last().unwrap().segments.is_empty());
         assert_eq!(graph.refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["feature", "main", "v1"]);
         assert_eq!(graph.index_by_oid[&top.oid], 0);
+    }
+
+    #[test]
+    fn remote_refs_and_upstreams_carry_the_remote_and_branch() {
+        let dir = build_fixture("tracking");
+        git(&dir, &["remote", "add", "origin", "git@github.com:owner/app.git"]);
+        git(&dir, &["remote", "add", "team/fork", "https://gitlab.com/team/app.git"]);
+        git(&dir, &["update-ref", "refs/remotes/origin/topic/x", "feature"]);
+        git(&dir, &["update-ref", "refs/remotes/team/fork/main", "main"]);
+        git(&dir, &["branch", "--set-upstream-to=origin/topic/x", "feature"]);
+        git(&dir, &["remote", "add", "mirror", "git@github.com:owner/mirror.git"]);
+        git(&dir, &["config", "remote.mirror.fetch", "+refs/heads/*:refs/remotes/mirror/prefix/*"]);
+        git(&dir, &["update-ref", "refs/remotes/mirror/prefix/release", "main"]);
+        git(&dir, &["config", "branch.main.remote", "mirror"]);
+        git(&dir, &["config", "branch.main.merge", "refs/heads/release"]);
+        git(&dir, &["branch", "pushed", "main"]);
+        git(&dir, &["update-ref", "refs/remotes/origin/pushed", "main"]);
+        git(&dir, &["branch", "unpushed", "main"]);
+        git(&dir, &["branch", "--track", "local-only", "main"]);
+        git(&dir, &["branch", "both", "main"]);
+        git(&dir, &["remote", "add", "gitlab", "https://gitlab.com/team/app.git"]);
+        git(&dir, &["update-ref", "refs/remotes/gitlab/both", "main"]);
+        git(&dir, &["update-ref", "refs/remotes/mirror/prefix/both", "main"]);
+        let repo = open(&dir).unwrap();
+        let graph = load_graph(&repo, true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let web: Vec<(&str, Option<&str>)> =
+            graph.remotes.iter().map(|r| (r.name.as_str(), r.web_url.as_deref())).collect();
+        assert!(web.contains(&("origin", Some("https://github.com/owner/app"))));
+        assert!(web.contains(&("team/fork", None)));
+
+        let tracking = |name: &str| graph.refs.iter().find(|r| r.name == name).unwrap().tracking.clone();
+        let t = |remote: &str, branch: &str| Some(Tracking { remote: remote.into(), branch: branch.into() });
+        assert_eq!(tracking("feature"), t("origin", "topic/x"));
+        assert_eq!(tracking("main"), t("mirror", "release"));
+        assert_eq!(tracking("origin/topic/x"), t("origin", "topic/x"));
+        assert_eq!(tracking("team/fork/main"), t("team/fork", "main"));
+        assert_eq!(tracking("mirror/prefix/release"), t("mirror", "release"));
+        assert_eq!(tracking("pushed"), t("origin", "pushed"));
+        assert_eq!(tracking("unpushed"), None);
+        assert_eq!(tracking("local-only"), None);
+        assert_eq!(tracking("both"), t("mirror", "both"));
     }
 
     #[test]

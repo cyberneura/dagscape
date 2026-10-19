@@ -1,12 +1,14 @@
 <script lang="ts">
   import type { RefInfo } from "./api";
+  import { showLinkMenu, type GitHub } from "./github";
 
   interface Props {
     refs: RefInfo[];
     activeOid: string | null;
+    github: GitHub;
     onjump: (oid: string) => void;
   }
-  let { refs, activeOid, onjump }: Props = $props();
+  let { refs, activeOid, github, onjump }: Props = $props();
 
   const branches = $derived(refs.filter((r) => r.kind === "branch"));
   const tags = $derived(
@@ -44,6 +46,7 @@
           : 'hover:bg-neutral-500/10'} {r.is_head ? 'font-bold' : ''}"
         title={r.full_name}
         onclick={() => onjump(r.oid)}
+        oncontextmenu={(e) => showLinkMenu(e, [{ text: "Open on GitHub", url: github.refUrl(r, r.oid) }])}
       >
         <span class="truncate">{r.name}</span>
       </button>

@@ -3,6 +3,7 @@
   import type { RowCache } from "./rowCache";
   import { HEADER_H, MIN_GRAPH_W, ROW_H, TARGET_GRAPH_W, drawGraph, graphWidth, laneWidth } from "./graph";
   import { formatDate } from "./format";
+  import { showLinkMenu, type GitHub } from "./github";
 
   interface Props {
     cache: RowCache;
@@ -10,9 +11,10 @@
     selected: number | null;
     hits: Set<number>;
     headOid: string | null;
+    github: GitHub;
     onselect: (index: number) => void;
   }
-  let { cache, maxLanes, selected, hits, headOid, onselect }: Props = $props();
+  let { cache, maxLanes, selected, hits, headOid, github, onselect }: Props = $props();
 
   let scroller = $state<HTMLDivElement | undefined>();
   let canvas = $state<HTMLCanvasElement | undefined>();
@@ -210,12 +212,24 @@
           aria-selected={i === selected}
           tabindex="-1"
           onclick={() => onselect(i)}
+          oncontextmenu={(e) => {
+            if (row) showLinkMenu(e, [{ text: "Open Commit on GitHub", url: github.commitUrl(row.oid) }]);
+          }}
         >
           <div class="shrink-0" style="width:{graphW}px"></div>
           {#if row}
             <div class="flex min-w-0 flex-1 items-center gap-1 pr-2">
               {#each row.refs as ref (ref.kind + ref.name)}
-                <span class="chip {chipClass(ref)}" title={ref.name}>{ref.name}</span>
+                <span
+                  class="chip {chipClass(ref)}"
+                  title={ref.name}
+                  role="note"
+                  oncontextmenu={(e) =>
+                    showLinkMenu(e, [
+                      { text: `Open ${ref.name} on GitHub`, url: github.refUrl(ref, row.oid) },
+                      { text: "Open Commit on GitHub", url: github.commitUrl(row.oid) },
+                    ])}>{ref.name}</span
+                >
               {/each}
               <span class="truncate">{row.summary}</span>
             </div>
