@@ -7,6 +7,7 @@
   import { load as loadStore, type Store } from "@tauri-apps/plugin-store";
   import { api, type RefLabel, type RepoSummary } from "$lib/api";
   import { RowCache } from "$lib/rowCache";
+  import { GitHub } from "$lib/github";
   import CommitList from "$lib/CommitList.svelte";
   import CommitDetail from "$lib/CommitDetail.svelte";
   import RefSidebar from "$lib/RefSidebar.svelte";
@@ -40,6 +41,7 @@
   let opening = false;
 
   const hitSet = $derived(new Set(hits));
+  const github = $derived(new GitHub(summary?.remotes ?? []));
   const status = $derived(
     loading
       ? "Loading…"
@@ -335,6 +337,7 @@
         <RefSidebar
           refs={summary?.refs ?? []}
           activeOid={selectedOid}
+          {github}
           onjump={(oid) => selectOid(oid, true)}
         />
       </div>
@@ -367,6 +370,7 @@
             {selected}
             hits={hitSet}
             headOid={summary.head?.oid ?? null}
+            {github}
             onselect={selectIndex}
           />
         </div>
@@ -380,6 +384,7 @@
           <CommitDetail
             oid={selectedOid}
             refs={selectedRefs}
+            {github}
             onjump={(oid) => selectOid(oid, true)}
           />
         </div>

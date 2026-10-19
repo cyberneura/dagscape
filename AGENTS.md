@@ -21,6 +21,7 @@ dagscape/
 │       ├── api.ts                 # Typed invoke() wrappers and the IPC types
 │       ├── rowCache.ts            # Chunked (256 rows) cache of commit rows fetched over IPC
 │       ├── graph.ts               # Canvas drawing of lanes (ROW_H, LANE_W, palette)
+│       ├── github.ts              # GitHub URLs for refs / commits / files / diffs; native context menu
 │       ├── CommitList.svelte      # Virtual scroller + Canvas overlay for the graph
 │       ├── CommitDetail.svelte    # Commit header, file list, unified diff
 │       └── RefSidebar.svelte      # Branches / remotes / tags
@@ -29,6 +30,7 @@ dagscape/
     ├── cli.rs                     # `dagscape` command (symlink in /usr/local/bin), --license
     ├── notices_tests.rs           # THIRD-PARTY-NOTICES.txt is in step with the lockfiles
     ├── repo.rs                    # git2: refs, revwalk, rows, commit detail, file diff, search
+    ├── github.rs                  # Remote URL (https / ssh / scp-like) → GitHub web URL
     ├── graph.rs                   # Lane layout (pure, unit-tested, no git dependency)
     └── watcher.rs                 # notify watcher on .git → "repo-changed" event
 ```
@@ -52,7 +54,8 @@ All rows live in the Rust side (`AppState.session.graph`); the webview keeps at 
 
 ## Tauri commands (`src-tauri/src/lib.rs`)
 
-- `open_repo(path, include_remotes)` → `RepoSummary` (also starts the `.git` watcher)
+- `open_repo(path, include_remotes)` → `RepoSummary` (also starts the `.git` watcher; `remotes`
+  carries each remote's GitHub web URL, and every ref its `tracking` remote branch)
 - `reload_repo(include_remotes?)` → `RepoSummary`
 - `get_rows(start, end)` → `Row[]`
 - `get_commit(oid)` → `CommitDetail` (diff against the first parent, renames detected)

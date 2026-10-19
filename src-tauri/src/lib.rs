@@ -1,4 +1,5 @@
 mod cli;
+mod github;
 mod graph;
 #[cfg(test)]
 mod notices_tests;
@@ -14,7 +15,7 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder};
 
-use repo::{CommitDetail, FileDiff, Graph, HeadInfo, RefInfo, Row};
+use repo::{CommitDetail, FileDiff, Graph, HeadInfo, RefInfo, RemoteInfo, Row};
 
 struct Session {
     repo: git2::Repository,
@@ -43,6 +44,7 @@ struct RepoSummary {
     max_lanes: usize,
     refs: Vec<RefInfo>,
     head: Option<HeadInfo>,
+    remotes: Vec<RemoteInfo>,
     include_remotes: bool,
     load_ms: u128,
 }
@@ -59,6 +61,7 @@ fn summarize(repo: &git2::Repository, graph: &Graph, include_remotes: bool, star
         max_lanes: graph.max_lanes,
         refs: graph.refs.clone(),
         head: graph.head.clone(),
+        remotes: graph.remotes.clone(),
         include_remotes,
         load_ms: started.elapsed().as_millis(),
     }
