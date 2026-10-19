@@ -75,8 +75,9 @@ Events emitted to the webview: `repo-changed` (watcher), `menu` (payload: `open-
   TypeScript narrow `x` to `null` forever.
 - Keyboard navigation is handled once, on `window`, in `+page.svelte`.
 - Comments explain non-obvious *why* only (hidden constraints, workarounds, surprising behaviour).
-- `git2` 0.21: `Reference::name()`, `Commit::summary()` (`Result<Option<&str>>`) and
-  `Signature::name()` / `email()` all return `Result`, not `Option`.
+- `git2` 0.21: `Reference::name()`, `Commit::summary()` / `Remote::name()` (`Result<Option<&str>>`),
+  `Remote::url()`, `Buf::as_str()` and `Signature::name()` / `email()` all return `Result`, not
+  `Option`; `StringArray::iter()` yields `Result<Option<&str>>`. `repo.remotes()` is alphabetical.
 
 ## Development Commands
 
@@ -117,7 +118,8 @@ what actually ships: the client bundle's modules (vite.config.js `listBundledMod
 the script), cargo-about for the release targets (`src-tauri/about.toml`), and native libraries
 shipped by `-sys` crates (vendored libgit2; zlib and the WebView2 loader on Windows). Texts that a
 package does not ship live in `vendor-licenses/<name>@<version>/`, copied from that version's
-upstream. **Re-run it and commit the result whenever a dependency is added or upgraded**; the
+upstream. **Re-run it and commit the result whenever a dependency is added or upgraded, or the
+frontend starts importing a package it did not bundle before** (e.g. a plugin used only from Rust); the
 tests in `notices_tests.rs` and the CI `--check` fail otherwise. A new `-sys` crate, an unknown
 virtual module, or a version bump of a vendored package stops the script until it is checked.
 
