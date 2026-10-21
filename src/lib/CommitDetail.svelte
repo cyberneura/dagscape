@@ -285,6 +285,7 @@
         aria-label="Resize file list"
         aria-valuenow={fileListWidth}
         aria-valuemin={fileListBounds.min}
+        aria-valuemax={fileListBounds.max()}
         tabindex="0"
       ></div>
       <div class="selectable min-w-0 flex-1 overflow-auto font-mono text-xs leading-5">

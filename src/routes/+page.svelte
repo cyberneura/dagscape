@@ -254,9 +254,12 @@
   }
 
   // The same bounds for the drag, the keys, a restored value and a window that shrank, so a
-  // size saved on a big screen cannot push the other panes off a small one.
-  const detailBounds: ResizeBounds = { min: 120, max: () => window.innerHeight - 200 };
-  const sidebarBounds: ResizeBounds = { min: 120, max: () => window.innerWidth - 400 };
+  // size saved on a big screen cannot push the other panes off a small one. The window size is
+  // state so the separators' aria-valuemax follows it.
+  let windowWidth = $state(0);
+  let windowHeight = $state(0);
+  const detailBounds: ResizeBounds = { min: 120, max: () => windowHeight - 200 };
+  const sidebarBounds: ResizeBounds = { min: 120, max: () => windowWidth - 400 };
 
   function startDetailResize(e: PointerEvent) {
     dragResize(e, {
@@ -311,6 +314,8 @@
   }
 
   function clampPanes() {
+    windowWidth = window.innerWidth;
+    windowHeight = window.innerHeight;
     detailHeight = clampSize(detailHeight, detailBounds);
     sidebarWidth = clampSize(sidebarWidth, sidebarBounds);
   }
@@ -318,6 +323,7 @@
   onMount(() => {
     const unlisteners: Array<() => void> = [];
     let disposed = false;
+    clampPanes();
     (async () => {
       store = await loadStore("settings.json");
       includeRemotes = (await store.get<boolean>("includeRemotes")) ?? true;
@@ -409,6 +415,7 @@
         aria-label="Resize sidebar"
         aria-valuenow={sidebarWidth}
         aria-valuemin={sidebarBounds.min}
+        aria-valuemax={sidebarBounds.max()}
         tabindex="0"
       ></div>
     {/if}
@@ -455,6 +462,7 @@
           aria-label="Resize commit detail"
           aria-valuenow={detailHeight}
           aria-valuemin={detailBounds.min}
+          aria-valuemax={detailBounds.max()}
           tabindex="0"
         ></div>
         <div class="shrink-0 bg-white dark:bg-neutral-900" style="height:{detailHeight}px">
