@@ -398,7 +398,7 @@
           onjump={(oid) => selectOid(oid, true)}
         />
       </div>
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <!-- A focusable separator is the WAI-ARIA window-splitter pattern; Svelte's a11y rules only know the static kind. -->
       <div
         class="w-1.5 shrink-0 cursor-col-resize touch-none bg-neutral-300 hover:bg-blue-400 focus:bg-blue-400 focus:outline-none dark:bg-neutral-700"
@@ -444,7 +444,7 @@
             onselect={selectIndex}
           />
         </div>
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <!-- A focusable separator is the WAI-ARIA window-splitter pattern; Svelte's a11y rules only know the static kind. -->
         <div
           class="h-1.5 shrink-0 cursor-row-resize touch-none bg-neutral-300 hover:bg-blue-400 focus:bg-blue-400 focus:outline-none dark:bg-neutral-700"
