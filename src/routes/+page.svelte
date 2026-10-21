@@ -5,6 +5,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { load as loadStore, type Store } from "@tauri-apps/plugin-store";
+  import { clampSize, dragResize, keyResize, type ResizeBounds } from "$lib/resize";
   import { api, type RefLabel, type RepoSummary } from "$lib/api";
   import { RowCache } from "$lib/rowCache";
   import { GitHub } from "$lib/github";
@@ -27,7 +28,10 @@
   let query = $state("");
   let hits = $state<number[]>([]);
   let hitPos = $state(0);
+  // Pane sizes, in px. Restored from the store once it is loaded; saved when a drag ends.
   let detailHeight = $state(320);
+  let sidebarWidth = $state(224);
+  let fileListWidth = $state(320);
   let showSidebar = $state(true);
   let list = $state<CommitList | undefined>();
   let searchInput = $state<HTMLInputElement | undefined>();
@@ -249,27 +253,85 @@
     selectIndex(next);
   }
 
-  function startResize(e: PointerEvent) {
-    const startY = e.clientY;
-    const startHeight = detailHeight;
-    const move = (ev: PointerEvent) => {
-      detailHeight = Math.max(120, Math.min(window.innerHeight - 200, startHeight + (startY - ev.clientY)));
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+  // The same bounds for the drag, the keys, a restored value and a window that shrank, so a
+  // size saved on a big screen cannot push the other panes off a small one. The window size is
+  // state so the separators' aria-valuemax follows it.
+  let windowWidth = $state(0);
+  let windowHeight = $state(0);
+  const detailBounds: ResizeBounds = { min: 120, max: () => windowHeight - 200 };
+  const sidebarBounds: ResizeBounds = { min: 120, max: () => windowWidth - 400 };
+
+  function startDetailResize(e: PointerEvent) {
+    dragResize(e, {
+      ...detailBounds,
+      axis: "y",
+      start: detailHeight,
+      invert: true,
+      onchange: (h) => (detailHeight = h),
+      ondone: (h) => void store?.set("detailHeight", h),
+    });
+  }
+
+  function startSidebarResize(e: PointerEvent) {
+    dragResize(e, {
+      ...sidebarBounds,
+      axis: "x",
+      start: sidebarWidth,
+      onchange: (w) => (sidebarWidth = w),
+      ondone: (w) => void store?.set("sidebarWidth", w),
+    });
+  }
+
+  function onDetailKey(e: KeyboardEvent) {
+    const h = keyResize(e, {
+      ...detailBounds,
+      axis: "y",
+      current: detailHeight,
+      invert: true,
+      onchange: (v) => (detailHeight = v),
+    });
+    if (h === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void store?.set("detailHeight", h);
+  }
+
+  function onSidebarKey(e: KeyboardEvent) {
+    const w = keyResize(e, {
+      ...sidebarBounds,
+      axis: "x",
+      current: sidebarWidth,
+      onchange: (v) => (sidebarWidth = v),
+    });
+    if (w === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void store?.set("sidebarWidth", w);
+  }
+
+  function saveFileListWidth(w: number) {
+    void store?.set("fileListWidth", w);
+  }
+
+  function clampPanes() {
+    windowWidth = window.innerWidth;
+    windowHeight = window.innerHeight;
+    detailHeight = clampSize(detailHeight, detailBounds);
+    sidebarWidth = clampSize(sidebarWidth, sidebarBounds);
   }
 
   onMount(() => {
     const unlisteners: Array<() => void> = [];
     let disposed = false;
+    clampPanes();
     (async () => {
       store = await loadStore("settings.json");
       includeRemotes = (await store.get<boolean>("includeRemotes")) ?? true;
       recent = (await store.get<string[]>("recent")) ?? [];
+      detailHeight = (await store.get<number>("detailHeight")) ?? detailHeight;
+      sidebarWidth = (await store.get<number>("sidebarWidth")) ?? sidebarWidth;
+      fileListWidth = (await store.get<number>("fileListWidth")) ?? fileListWidth;
+      clampPanes();
       unlisteners.push(await listen("repo-changed", () => reload()));
       unlisteners.push(await listen<string>("menu", (e) => onMenu(e.payload)));
       unlisteners.push(
@@ -289,7 +351,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onresize={clampPanes} />
 
 <div class="flex h-screen flex-col">
   <div
@@ -332,7 +394,8 @@
   <div class="flex min-h-0 flex-1">
     {#if showSidebar}
       <div
-        class="w-56 shrink-0 border-r border-neutral-300 bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-800/60"
+        class="shrink-0 overflow-hidden bg-neutral-50 dark:bg-neutral-800/60"
+        style="width:{sidebarWidth}px"
       >
         <RefSidebar
           refs={summary?.refs ?? []}
@@ -341,6 +404,20 @@
           onjump={(oid) => selectOid(oid, true)}
         />
       </div>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <!-- A focusable separator is the WAI-ARIA window-splitter pattern; Svelte's a11y rules only know the static kind. -->
+      <div
+        class="w-1.5 shrink-0 cursor-col-resize touch-none bg-neutral-300 hover:bg-blue-400 focus:bg-blue-400 focus:outline-none dark:bg-neutral-700"
+        onpointerdown={startSidebarResize}
+        onkeydown={onSidebarKey}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        aria-valuenow={sidebarWidth}
+        aria-valuemin={sidebarBounds.min}
+        aria-valuemax={sidebarBounds.max()}
+        tabindex="0"
+      ></div>
     {/if}
     <div class="flex min-w-0 flex-1 flex-col">
       {#if !summary}
@@ -374,17 +451,27 @@
             onselect={selectIndex}
           />
         </div>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <!-- A focusable separator is the WAI-ARIA window-splitter pattern; Svelte's a11y rules only know the static kind. -->
         <div
-          class="h-1.5 shrink-0 cursor-row-resize bg-neutral-300 hover:bg-blue-400 dark:bg-neutral-700"
-          onpointerdown={startResize}
+          class="h-1.5 shrink-0 cursor-row-resize touch-none bg-neutral-300 hover:bg-blue-400 focus:bg-blue-400 focus:outline-none dark:bg-neutral-700"
+          onpointerdown={startDetailResize}
+          onkeydown={onDetailKey}
           role="separator"
           aria-orientation="horizontal"
+          aria-label="Resize commit detail"
+          aria-valuenow={detailHeight}
+          aria-valuemin={detailBounds.min}
+          aria-valuemax={detailBounds.max()}
+          tabindex="0"
         ></div>
         <div class="shrink-0 bg-white dark:bg-neutral-900" style="height:{detailHeight}px">
           <CommitDetail
             oid={selectedOid}
             refs={selectedRefs}
             {github}
+            bind:fileListWidth
+            onfilelistresized={saveFileListWidth}
             onjump={(oid) => selectOid(oid, true)}
           />
         </div>

@@ -74,6 +74,16 @@ Events emitted to the webview: `repo-changed` (watcher), `menu` (payload: `open-
   `let x = $state<T | null>(null)`; the annotated form `let x: T | null = $state(null)` makes
   TypeScript narrow `x` to `null` forever.
 - Keyboard navigation is handled once, on `window`, in `+page.svelte`.
+- The three pane separators (sidebar | list, list / detail, file list | diff) resize through
+  `lib/resize.ts`: `dragResize` (pointer capture on the handle, ends on up / cancel / lost capture)
+  and `keyResize` (focusable `role="separator"`, arrow keys / Home / End, 16 px steps). The sizes are
+  persisted in the settings store as `sidebarWidth` / `detailHeight` / `fileListWidth` (px) when a
+  drag or key step ends, and clamped to the same bounds on restore and when the window (or, for the
+  file list, its pane) shrinks. The file list's width is a `$bindable` prop of `CommitDetail`, so the
+  shell owns the store and the component owns the drag.
+- File paths in the detail's file list truncate at the *start* (`.truncate-start` in `app.css`:
+  outer box `direction: rtl`, inner span isolated back to `ltr`), because the tail is what tells
+  files apart.
 - Comments explain non-obvious *why* only (hidden constraints, workarounds, surprising behaviour).
 - `git2` 0.21: `Reference::name()`, `Commit::summary()` / `Remote::name()` (`Result<Option<&str>>`),
   `Remote::url()`, `Buf::as_str()` and `Signature::name()` / `email()` all return `Result`, not
