@@ -9,14 +9,63 @@
   } from "./api";
   import { formatDateTime } from "./format";
   import { showLinkMenu, type GitHub, type LinkItem } from "./github";
+  import { clampSize, dragResize, keyResize, type ResizeBounds } from "./resize";
 
   interface Props {
     oid: string | null;
     refs: RefLabel[];
     github: GitHub;
+    /** Width of the file list, in px. Bindable so the shell can restore and persist it. */
+    fileListWidth?: number;
+    onfilelistresized?: (width: number) => void;
     onjump: (oid: string) => void;
   }
-  let { oid, refs, github, onjump }: Props = $props();
+  let { oid, refs, github, fileListWidth = $bindable(320), onfilelistresized, onjump }: Props = $props();
+  let panes = $state<HTMLDivElement | null>(null);
+  let panesWidth = $state(0);
+  // Leave room for the diff whatever the window (or the sidebar) does.
+  const fileListBounds: ResizeBounds = {
+    min: 120,
+    max: () => Math.max(120, (panesWidth || window.innerWidth) - 200),
+  };
+
+  // Re-clamp when the room changes: a width restored from the store on a smaller window, or the
+  // sidebar being widened. ResizeObserver rather than the window's resize, because the pane's
+  // width also moves when the sidebar does.
+  $effect(() => {
+    const el = panes;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      panesWidth = el.clientWidth;
+      const clamped = clampSize(fileListWidth, fileListBounds);
+      if (clamped !== fileListWidth) fileListWidth = clamped;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  function startFileListResize(e: PointerEvent) {
+    dragResize(e, {
+      ...fileListBounds,
+      axis: "x",
+      start: fileListWidth,
+      onchange: (w) => (fileListWidth = w),
+      ondone: (w) => onfilelistresized?.(w),
+    });
+  }
+
+  function onFileListKey(e: KeyboardEvent) {
+    const w = keyResize(e, {
+      ...fileListBounds,
+      axis: "x",
+      current: fileListWidth,
+      onchange: (v) => (fileListWidth = v),
+    });
+    if (w === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onfilelistresized?.(w);
+  }
 
   let detail = $state<CommitDetail | null>(null);
   let error = $state<string | null>(null);
@@ -194,10 +243,8 @@
       <pre
         class="mt-2 max-h-40 overflow-auto font-sans text-[13px] whitespace-pre-wrap">{detail.message.trim()}</pre>
     </div>
-    <div class="flex min-h-0 flex-1">
-      <div
-        class="w-80 shrink-0 overflow-auto border-r border-neutral-200 py-1 dark:border-neutral-700"
-      >
+    <div class="flex min-h-0 flex-1" bind:this={panes}>
+      <div class="shrink-0 overflow-auto py-1" style="width:{fileListWidth}px">
         {#each detail.files as file (file.path)}
           <button
             class="flex w-full items-center gap-2 px-2 py-0.5 text-left {selectedFile === file
@@ -208,9 +255,12 @@
             title={file.old_path ? `${file.old_path} → ${file.path}` : file.path}
           >
             <span class="w-3 shrink-0 font-mono text-xs {statusClass(file.status)}">{file.status}</span>
-            <span class="min-w-0 flex-1 truncate">
-              {#if file.old_path}<span class="text-neutral-400">{file.old_path} → </span>{/if}{file.path}
-            </span>
+            <!-- Paths are told apart by their tail (the file name), so the ellipsis goes at the start. -->
+            <span class="truncate-start min-w-0 flex-1"
+              ><span
+                >{#if file.old_path}<span class="text-neutral-400">{file.old_path} → </span>{/if}{file.path}</span
+              ></span
+            >
             {#if file.binary}
               <span class="shrink-0 text-[11px] text-neutral-400">bin</span>
             {:else}
@@ -224,6 +274,19 @@
           </div>
         {/each}
       </div>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
+      <!-- A focusable separator is the WAI-ARIA window-splitter pattern; Svelte's a11y rules only know the static kind. -->
+      <div
+        class="w-1.5 shrink-0 cursor-col-resize touch-none bg-neutral-200 hover:bg-blue-400 focus:bg-blue-400 focus:outline-none dark:bg-neutral-700"
+        onpointerdown={startFileListResize}
+        onkeydown={onFileListKey}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize file list"
+        aria-valuenow={fileListWidth}
+        aria-valuemin={fileListBounds.min}
+        tabindex="0"
+      ></div>
       <div class="selectable min-w-0 flex-1 overflow-auto font-mono text-xs leading-5">
         {#if diffError}
           <div class="p-2 text-red-500">{diffError}</div>

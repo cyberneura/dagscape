@@ -29,6 +29,22 @@ body {
   font-weight: 500;
 }
 
+/* Ellipsis at the start, keeping the tail visible (file paths: the name is what tells them apart).
+   The outer box is laid out right-to-left so overflow is clipped on the left; the inner span is
+   isolated back to left-to-right so the outer RTL does not move a trailing ")" or "/" to the other
+   end. Bidirectional text inside the path (Hebrew, Arabic) is still shaped as usual. */
+.truncate-start {
+  direction: rtl;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.truncate-start > span {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
 .selectable {
   user-select: text;
   cursor: text;
