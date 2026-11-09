@@ -4,6 +4,8 @@ A branch graph browser for Git. Shows the whole repository, every branch and tag
 as a lane graph you can scroll through, in the spirit of GitX. Built with Tauri 2, Svelte 5 and
 libgit2, so it runs natively on Apple Silicon (and Windows).
 
+Website: https://www.cyberneura.com/app/dagscape
+
 ![Dagscape](docs/screenshot.png)
 
 ## Features
