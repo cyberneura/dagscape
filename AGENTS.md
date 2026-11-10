@@ -133,18 +133,15 @@ frontend starts importing a package it did not bundle before** (e.g. a plugin us
 tests in `notices_tests.rs` and the CI `--check` fail otherwise. A new `-sys` crate, an unknown
 virtual module, or a version bump of a vendored package stops the script until it is checked.
 
-## App icon
+## macOS app icon
 
-Masters are in `resources/app-icons/` (`dagscape-favicon.png` full-bleed, `dagscape-mac-icon.png`
-with a 10% margin). `pnpm tauri icon` writes `.icns` smallest-first, which 1Password's dialogs show
-blurred, so rebuild it largest-first afterwards and drop the mobile icons:
-
-```bash
-pnpm tauri icon "$PWD/resources/app-icons/dagscape-favicon.png"
-python3 ~/workspace/astragal/resources/app-icons/build_icns.py \
-  resources/app-icons/dagscape-mac-icon.png src-tauri/icons/icon.icns
-rm -rf src-tauri/icons/android src-tauri/icons/ios
-```
+Run `bash scripts/generate-macos-icons.sh` with Xcode on macOS. Fixed artwork,
+layout measurements, size-specific sources and the verification command are in
+`resources/app-icons/README.md`. Small @1x backgrounds reach the canvas edges;
+the glyph fits inside the central 80%. Larger backgrounds have 10% outer margins.
+Do not replace the generated ICNS with `tauri icon` / `iconutil`: preserve the
+ARGB small entries and the matching Assets.car / CFBundleIconName registration.
+Native rendering is verified by `.github/workflows/macos-icons.yml`.
 
 ## Testing
 
