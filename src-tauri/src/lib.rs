@@ -246,12 +246,17 @@ fn about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
 
 /// Menu::default の About (macOS はアプリメニューの 0 番目、ほかは Help の 0 番目) を
 /// ビルド日時入りのものに置き換える。
+/// Windows の既定ラベルはニーモニック付きの `&About` で、text() もそのまま返すので `&` を除いて比べる。
 fn replace_about<R: Runtime>(app: &AppHandle<R>, submenu: &Submenu<R>) -> tauri::Result<()> {
     let is_about = submenu
         .items()?
         .first()
         .and_then(|item| item.as_predefined_menuitem().cloned())
-        .map(|item| item.text().map(|t| t.starts_with("About")).unwrap_or(false))
+        .map(|item| {
+            item.text()
+                .map(|t| t.replace('&', "").starts_with("About"))
+                .unwrap_or(false)
+        })
         .unwrap_or(false);
     if is_about {
         submenu.remove_at(0)?;
