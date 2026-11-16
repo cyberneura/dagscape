@@ -24,6 +24,8 @@ dagscape/
 │       ├── github.ts              # GitHub URLs for refs / commits / files / diffs; native context menu
 │       ├── CommitList.svelte      # Virtual scroller + Canvas overlay for the graph
 │       ├── CommitDetail.svelte    # Commit header, file list, unified diff
+│       ├── FilePreview.svelte     # Above the diff: size, added / modified dates, media preview
+│       ├── filePreview.ts         # Extension → preview kind / MIME type, byte formatting
 │       └── RefSidebar.svelte      # Branches / remotes / tags
 └── src-tauri/src/
     ├── lib.rs                     # Tauri commands, app state (one open repository), menu
@@ -60,6 +62,14 @@ All rows live in the Rust side (`AppState.session.graph`); the webview keeps at 
 - `get_rows(start, end)` → `Row[]`
 - `get_commit(oid)` → `CommitDetail` (diff against the first parent, renames detected)
 - `get_file_diff(oid, path, old_path?)` → `FileDiff` (capped at 50k lines)
+- `get_file_info(oid, path, old_path?)` → `FileInfo` (blob sizes on both sides, the commit that
+  first added the path, this commit). The history walk opens its own `Repository` on a blocking
+  thread so it does not hold the session lock; it follows only commits that have the path and
+  gives up (`added: null`) after 100k commits
+- `get_blob(oid, path, old_path?, side)` → raw bytes as an `ArrayBuffer` (`tauri::ipc::Response`),
+  `side` = `new` (this commit) or `old` (first parent), capped at 64 MiB. The front wraps them in a
+  Blob URL with the MIME type from `filePreview.ts` and shows images (before / after), video,
+  audio and PDF; SVG goes through `<img>` so its scripts do not run
 - `search_commits(query)` → row indices
 - `row_index_of(oid)` → index or null
 - `initial_path()` → the CLI argument, once

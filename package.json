@@ -1,6 +1,6 @@
 {
   "name": "dagscape",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Dagscape - a branch graph browser for Git",
   "type": "module",
   "scripts": {

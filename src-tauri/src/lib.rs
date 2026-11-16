@@ -8,14 +8,14 @@ mod watcher;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder};
 
-use repo::{CommitDetail, FileDiff, Graph, HeadInfo, RefInfo, RemoteInfo, Row};
+use repo::{CommitDetail, FileDiff, FileInfo, Graph, HeadInfo, RefInfo, RemoteInfo, Row};
 
 struct Session {
     repo: git2::Repository,
@@ -33,6 +33,8 @@ struct AppState {
     /// open_repo の受付番号。大きいリポジトリ A の読込中に B を開き、A が後から終わっても
     /// A で上書きしないよう、受付順で新しい方だけを採用する
     open_ticket: AtomicU64,
+    /// get_file_info の受付番号。ファイルを次々に選んだ時、古い要求の履歴探索を途中で止める
+    file_info_ticket: Arc<AtomicU64>,
     installed_ticket: AtomicU64,
 }
 
@@ -146,6 +148,53 @@ async fn get_file_diff(
     let guard = lock_session(&state);
     let session = guard.as_ref().ok_or("No repository is open")?;
     repo::file_diff(&session.repo, &oid, &path, old_path.as_deref())
+}
+
+/// 差分ペインの上に出すファイルの情報。足されたコミットを探すのに履歴をたどるので、
+/// セッションのロックを握ったままにせず (一覧のスクロールが止まる)、別のハンドルで開いて別スレッドで読む
+#[tauri::command]
+async fn get_file_info(
+    state: State<'_, AppState>,
+    oid: String,
+    path: String,
+    old_path: Option<String>,
+) -> Result<FileInfo, String> {
+    let git_dir = session_git_dir(&state)?;
+    let latest = state.file_info_ticket.clone();
+    let ticket = latest.fetch_add(1, Ordering::SeqCst) + 1;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        let superseded = || latest.load(Ordering::SeqCst) != ticket;
+        repo::file_info(&repo, &oid, &path, old_path.as_deref(), &superseded)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 開いているリポジトリの .git。重い読み取りはこれを別のハンドルで開き直し、セッションのロックを握らずに行う
+fn session_git_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
+    let guard = lock_session(state);
+    Ok(guard.as_ref().ok_or("No repository is open")?.repo.path().to_path_buf())
+}
+
+/// プレビュー用の blob の中身。JSON の数値配列にせず、webview には ArrayBuffer で渡す。
+/// 最大 64 MiB の展開とコピーになるので、get_file_info と同じく別のハンドル・別スレッドで読む
+#[tauri::command]
+async fn get_blob(
+    state: State<'_, AppState>,
+    oid: String,
+    path: String,
+    old_path: Option<String>,
+    side: String,
+) -> Result<tauri::ipc::Response, String> {
+    let git_dir = session_git_dir(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        repo::blob_bytes(&repo, &oid, &path, old_path.as_deref(), &side)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(tauri::ipc::Response::new)
 }
 
 #[tauri::command]
@@ -321,6 +370,8 @@ pub fn run() {
             get_rows,
             get_commit,
             get_file_diff,
+            get_file_info,
+            get_blob,
             search_commits,
             row_index_of,
             initial_path,

@@ -109,6 +109,29 @@ export interface FileDiff {
   lines: DiffLine[];
 }
 
+export interface BlobSide {
+  oid: string;
+  size: number;
+}
+
+export interface CommitStamp {
+  oid: string;
+  short: string;
+  time: number;
+}
+
+export interface FileInfo {
+  /** The blob at this commit; null when the file was deleted. */
+  new: BlobSide | null;
+  /** The blob at the first parent (old path for a rename); null when the file was added. */
+  old: BlobSide | null;
+  /** The commit that first added the path; null when the history walk hit its limit. */
+  added: CommitStamp | null;
+  modified: CommitStamp;
+}
+
+export type BlobSideName = "new" | "old";
+
 export const api = {
   openRepo: (path: string, includeRemotes: boolean) =>
     invoke<RepoSummary>("open_repo", { path, includeRemotes }),
@@ -119,6 +142,11 @@ export const api = {
   getCommit: (oid: string) => invoke<CommitDetail>("get_commit", { oid }),
   getFileDiff: (oid: string, path: string, oldPath: string | null) =>
     invoke<FileDiff>("get_file_diff", { oid, path, oldPath }),
+  getFileInfo: (oid: string, path: string, oldPath: string | null) =>
+    invoke<FileInfo>("get_file_info", { oid, path, oldPath }),
+  /** Raw bytes (an ArrayBuffer over IPC, not a JSON array). */
+  getBlob: (oid: string, path: string, oldPath: string | null, side: BlobSideName) =>
+    invoke<ArrayBuffer>("get_blob", { oid, path, oldPath, side }),
   searchCommits: (query: string) => invoke<number[]>("search_commits", { query }),
   rowIndexOf: (oid: string) => invoke<number | null>("row_index_of", { oid }),
   initialPath: () => invoke<string | null>("initial_path"),

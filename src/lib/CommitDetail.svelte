@@ -8,6 +8,8 @@
     type RefLabel,
   } from "./api";
   import { formatDateTime } from "./format";
+  import FilePreview from "./FilePreview.svelte";
+  import { previewType } from "./filePreview";
   import { showLinkMenu, type GitHub, type LinkItem } from "./github";
   import { clampSize, dragResize, keyResize, type ResizeBounds } from "./resize";
 
@@ -289,10 +291,15 @@
         tabindex="0"
       ></div>
       <div class="selectable min-w-0 flex-1 overflow-auto font-mono text-xs leading-5">
+        {#if selectedFile}
+          {#key selectedFile}
+            <FilePreview oid={detail.oid} file={selectedFile} {onjump} />
+          {/key}
+        {/if}
         {#if diffError}
           <div class="p-2 text-red-500">{diffError}</div>
         {:else if diff}
-          {#if diff.binary}
+          {#if diff.binary && !(selectedFile && previewType(selectedFile.path))}
             <div class="p-2 text-neutral-500">Binary file</div>
           {/if}
           <table class="w-full border-collapse">
