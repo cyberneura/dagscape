@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::menu::{Menu, MenuItem, Submenu};
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder};
 
 use repo::{CommitDetail, FileDiff, Graph, HeadInfo, RefInfo, RemoteInfo, Row};
@@ -209,6 +209,58 @@ fn install_cli<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
+/// ビルド日時 (UTC、"YYYY-MM-DD HH:MM")。build.rs が `DAGSCAPE_BUILD_DATE` として埋め込む (CYBERNEURA-DEV-1291)
+const BUILD_DATE: &str = env!("DAGSCAPE_BUILD_DATE");
+
+/// About に出す情報。Menu::default と同じ項目に、ビルド日時を足す。
+///
+/// macOS の標準パネルは `Version <version> (<short_version>)` の 1 行で (muda の `version` が
+/// NSAboutPanelOptionApplicationVersion、`short_version` が括弧側の NSAboutPanelOptionVersion)、
+/// 何も指定しないと両方に同じ番号が入り `Version 0.4.1 (0.4.1)` になる。番号は `version` にだけ
+/// 入れて括弧側を空文字にし (括弧ごと消える)、ビルド日時は次の行 (credits) に
+/// `2026-11-16 12:23 (UTC)` の形で出す。
+/// credits は macOS でしか表示されないので、ほかでは括弧側にビルド日時を入れる。
+fn about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
+    let info = app.package_info();
+    let config = app.config();
+    let base = AboutMetadata {
+        name: Some(info.name.clone()),
+        version: Some(info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+    if cfg!(target_os = "macos") {
+        AboutMetadata {
+            short_version: Some(String::new()),
+            credits: Some(format!("{BUILD_DATE} (UTC)")),
+            ..base
+        }
+    } else {
+        AboutMetadata {
+            short_version: Some(format!("{BUILD_DATE} UTC")),
+            ..base
+        }
+    }
+}
+
+/// Menu::default の About (macOS はアプリメニューの 0 番目、ほかは Help の 0 番目) を
+/// ビルド日時入りのものに置き換える。
+fn replace_about<R: Runtime>(app: &AppHandle<R>, submenu: &Submenu<R>) -> tauri::Result<()> {
+    let is_about = submenu
+        .items()?
+        .first()
+        .and_then(|item| item.as_predefined_menuitem().cloned())
+        .map(|item| item.text().map(|t| t.starts_with("About")).unwrap_or(false))
+        .unwrap_or(false);
+    if is_about {
+        submenu.remove_at(0)?;
+    }
+    let about = PredefinedMenuItem::about(app, None, Some(about_metadata(app)))?;
+    submenu.insert(&about, 0)?;
+    Ok(())
+}
+
 const MENU_OPEN: &str = "open-repo";
 const MENU_RELOAD: &str = "reload-repo";
 const MENU_FIND: &str = "find";
@@ -241,7 +293,6 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let licenses = MenuItem::with_id(app, LICENSES_ID, "Third-Party Licenses", true, None::<&str>)?;
     #[cfg(target_os = "macos")]
     {
-        use tauri::menu::PredefinedMenuItem;
         let install = MenuItem::with_id(
             app,
             MENU_INSTALL_CLI,
@@ -251,6 +302,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         )?;
         // Menu::default はアプリメニューを先頭に置き、その 0 番目が About
         if let Some(app_menu) = menu.items()?.first().and_then(|item| item.as_submenu().cloned()) {
+            replace_about(app, &app_menu)?;
             app_menu.insert(&licenses, 1)?;
             app_menu.insert(&PredefinedMenuItem::separator(app)?, 2)?;
             app_menu.insert(&install, 3)?;
@@ -259,8 +311,14 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     #[cfg(not(target_os = "macos"))]
     {
         match menu.get(tauri::menu::HELP_SUBMENU_ID).and_then(|item| item.as_submenu().cloned()) {
-            Some(help) => help.append(&licenses)?,
-            None => menu.append(&Submenu::with_items(app, "Help", true, &[&licenses])?)?,
+            Some(help) => {
+                replace_about(app, &help)?;
+                help.append(&licenses)?
+            }
+            None => {
+                let about = PredefinedMenuItem::about(app, None, Some(about_metadata(app)))?;
+                menu.append(&Submenu::with_items(app, "Help", true, &[&about, &licenses])?)?
+            }
         }
     }
     Ok(menu)
