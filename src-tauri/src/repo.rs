@@ -569,6 +569,172 @@ pub fn file_diff(
     })
 }
 
+/// プレビューのために webview へ渡す blob の上限。画像・動画・PDF の実用的な大きさは入り、
+/// 巨大な成果物をうっかり選んでも IPC とメモリを食い潰さない値
+pub const MAX_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+/// 「このパスを足したコミット」を探す時にたどるコミット数の上限
+const MAX_HISTORY_COMMITS: usize = 100_000;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BlobSide {
+    pub oid: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CommitStamp {
+    pub oid: String,
+    pub short: String,
+    /// author の時刻 (一覧の DATE 列と同じ)
+    pub time: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FileInfo {
+    /// このコミットでの blob。削除なら None
+    pub new: Option<BlobSide>,
+    /// 第一親での blob (rename なら旧パス)。追加なら None
+    pub old: Option<BlobSide>,
+    /// このパスが最初に現れたコミット。たどる上限を超えた・親が読めない (shallow clone の境界) なら None
+    pub added: Option<CommitStamp>,
+    /// このコミット (このファイルを変更した最新のコミット)
+    pub modified: CommitStamp,
+}
+
+fn stamp(commit: &Commit<'_>) -> CommitStamp {
+    let oid = commit.id().to_string();
+    CommitStamp {
+        short: oid[..7].to_string(),
+        oid,
+        time: commit.author().when().seconds(),
+    }
+}
+
+/// tree の中の path にある blob の id。無い・blob でない (サブモジュール等) なら None
+fn blob_id_at(tree: &git2::Tree<'_>, path: &str) -> Option<Oid> {
+    let entry = tree.get_path(Path::new(path)).ok()?;
+    (entry.kind() == Some(git2::ObjectType::Blob)).then(|| entry.id())
+}
+
+fn blob_side(repo: &Repository, tree: Option<&git2::Tree<'_>>, path: &str) -> Result<Option<BlobSide>, String> {
+    let Some(id) = tree.and_then(|t| blob_id_at(t, path)) else {
+        return Ok(None);
+    };
+    // 中身を読まずに大きさだけ取る
+    let odb = repo.odb().map_err(|e| e.message().to_string())?;
+    let (size, _) = odb.read_header(id).map_err(|e| e.message().to_string())?;
+    Ok(Some(BlobSide {
+        oid: id.to_string(),
+        size: size as u64,
+    }))
+}
+
+fn first_parent_tree<'r>(commit: &Commit<'r>) -> Result<Option<git2::Tree<'r>>, String> {
+    if commit.parent_count() == 0 {
+        return Ok(None);
+    }
+    let err = |e: git2::Error| e.message().to_string();
+    Ok(Some(commit.parent(0).map_err(err)?.tree().map_err(err)?))
+}
+
+/// start から祖先をたどり、path を持たない親しか無いコミット (= path を足したコミット) のうち
+/// 最も古いものを返す。path を持つコミットだけを進むので、たどる範囲はそのファイルの生存期間に限られる。
+/// 親が読めない (shallow clone の境界) 時は、境界のコミットを「足した」と取り違えないよう None。
+/// should_stop が true を返したら (別のファイルが選ばれた) Err で打ち切る
+fn introduced_by<'r>(
+    repo: &'r Repository,
+    start: Commit<'r>,
+    path: &str,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<Option<Commit<'r>>, String> {
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(start.id());
+    let mut stack = vec![start];
+    let mut oldest: Option<Commit<'r>> = None;
+    while let Some(commit) = stack.pop() {
+        if should_stop() {
+            return Err("Cancelled".to_string());
+        }
+        let mut continues = false;
+        for pid in commit.parent_ids() {
+            let Ok(parent) = repo.find_commit(pid) else { return Ok(None) };
+            let Ok(tree) = parent.tree() else { return Ok(None) };
+            let has = blob_id_at(&tree, path).is_some();
+            if !has {
+                continue;
+            }
+            continues = true;
+            if seen.insert(pid) {
+                if seen.len() > MAX_HISTORY_COMMITS {
+                    return Ok(None);
+                }
+                stack.push(parent);
+            }
+        }
+        if !continues && oldest.as_ref().is_none_or(|o| commit.author().when().seconds() < o.author().when().seconds()) {
+            oldest = Some(commit);
+        }
+    }
+    Ok(oldest)
+}
+
+/// 差分ペインの上に出すファイルの情報: 両側の大きさ、足されたコミット、このコミット。
+pub fn file_info(
+    repo: &Repository,
+    oid: &str,
+    path: &str,
+    old_path: Option<&str>,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<FileInfo, String> {
+    let commit = find_commit(repo, oid)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let parent_tree = first_parent_tree(&commit)?;
+    let old_path = old_path.unwrap_or(path);
+    let new = blob_side(repo, Some(&tree), path)?;
+    let old = blob_side(repo, parent_tree.as_ref(), old_path)?;
+    // 削除されたファイルは、親から旧パスでさかのぼる
+    let added = if new.is_some() {
+        introduced_by(repo, commit.clone(), path, should_stop)?
+    } else if old.is_some() {
+        introduced_by(repo, commit.parent(0).map_err(|e| e.message().to_string())?, old_path, should_stop)?
+    } else {
+        None
+    };
+    Ok(FileInfo {
+        new,
+        old,
+        added: added.as_ref().map(stamp),
+        modified: stamp(&commit),
+    })
+}
+
+/// プレビュー用に blob の中身を返す。side は "new" (このコミット) か "old" (第一親、rename なら旧パス)
+pub fn blob_bytes(
+    repo: &Repository,
+    oid: &str,
+    path: &str,
+    old_path: Option<&str>,
+    side: &str,
+) -> Result<Vec<u8>, String> {
+    let commit = find_commit(repo, oid)?;
+    let (tree, path) = match side {
+        "new" => (Some(commit.tree().map_err(|e| e.message().to_string())?), path),
+        "old" => (first_parent_tree(&commit)?, old_path.unwrap_or(path)),
+        _ => return Err(format!("Unknown side: {side}")),
+    };
+    let id = tree
+        .as_ref()
+        .and_then(|t| blob_id_at(t, path))
+        .ok_or_else(|| format!("{path} does not exist on the {side} side"))?;
+    let odb = repo.odb().map_err(|e| e.message().to_string())?;
+    let (size, _) = odb.read_header(id).map_err(|e| e.message().to_string())?;
+    if size as u64 > MAX_PREVIEW_BYTES {
+        return Err(format!("Too large to preview ({size} bytes)"));
+    }
+    let blob = repo.find_blob(id).map_err(|e| e.message().to_string())?;
+    Ok(blob.content().to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,6 +925,63 @@ mod tests {
     fn opening_a_plain_directory_fails() {
         let dir = temp_repo("plain");
         let result = open(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn file_info_reports_sizes_and_the_adding_commit() {
+        let dir = build_fixture("file_info");
+        let repo = open(&dir).unwrap();
+        let first = git(&dir, &["rev-parse", "main~3"]);
+        let third = git(&dir, &["rev-parse", "main~1"]);
+        let feature = git(&dir, &["rev-parse", "feature"]);
+        let merge = git(&dir, &["rev-parse", "main"]);
+
+        let a = file_info(&repo, &third, "a.txt", None, &|| false).unwrap();
+        assert_eq!(a.new.as_ref().unwrap().size, "one\ntwo\nthree\n".len() as u64);
+        assert_eq!(a.old.as_ref().unwrap().size, "one\ntwo\n".len() as u64);
+        assert_eq!(a.added.unwrap().oid, first);
+        assert_eq!(a.modified.oid, third);
+
+        // マージで入った b.txt は第一親に無いので old は None、足したのは feature 側のコミット
+        let b = file_info(&repo, &merge, "b.txt", None, &|| false).unwrap();
+        assert!(b.old.is_none());
+        assert_eq!(b.added.unwrap().oid, feature);
+
+        // 削除は親から旧パスでさかのぼる
+        git(&dir, &["rm", "-q", "a.txt"]);
+        git(&dir, &["commit", "-q", "-m", "remove a"]);
+        let removed = git(&dir, &["rev-parse", "main"]);
+        let gone = file_info(&repo, &removed, "a.txt", None, &|| false).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone.new.is_none());
+        assert!(gone.old.is_some());
+        assert_eq!(gone.added.unwrap().oid, first);
+    }
+
+    #[test]
+    fn blob_bytes_reads_either_side() {
+        let dir = build_fixture("blob_bytes");
+        let repo = open(&dir).unwrap();
+        let third = git(&dir, &["rev-parse", "main~1"]);
+        let new = blob_bytes(&repo, &third, "a.txt", None, "new").unwrap();
+        let old = blob_bytes(&repo, &third, "a.txt", None, "old").unwrap();
+        let missing = blob_bytes(&repo, &third, "b.txt", None, "new");
+        let bad_side = blob_bytes(&repo, &third, "a.txt", None, "both");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(new, b"one\ntwo\nthree\n");
+        assert_eq!(old, b"one\ntwo\n");
+        assert!(missing.is_err());
+        assert!(bad_side.is_err());
+    }
+
+    #[test]
+    fn file_info_stops_when_asked() {
+        let dir = build_fixture("file_info_stop");
+        let repo = open(&dir).unwrap();
+        let head = git(&dir, &["rev-parse", "main"]);
+        let result = file_info(&repo, &head, "a.txt", None, &|| true);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(result.is_err());
     }
