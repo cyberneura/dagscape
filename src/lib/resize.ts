@@ -1,5 +1,5 @@
-// Resizing of a pane from its separator, shared by the three separators (sidebar | list,
-// list / detail, file list | diff): a pointer drag, and the arrow keys for keyboard users
+// Resizing of a pane from its separator, shared by the four separators (sidebar | list,
+// list / detail, commit header / files, file list | diff): a pointer drag, and the arrow keys for keyboard users
 // (WAI-ARIA window splitter: the separator is focusable and carries value / min / max).
 
 export interface ResizeBounds {
