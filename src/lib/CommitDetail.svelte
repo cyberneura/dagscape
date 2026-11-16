@@ -18,9 +18,24 @@
     /** Width of the file list, in px. Bindable so the shell can restore and persist it. */
     fileListWidth?: number;
     onfilelistresized?: (width: number) => void;
+    /**
+     * Height of the commit header (id, refs, author, message), in px. null fits it to the content
+     * with the message capped, as before it could be resized. Bindable like fileListWidth.
+     */
+    headerHeight?: number | null;
+    onheaderresized?: (height: number | null) => void;
     onjump: (oid: string) => void;
   }
-  let { oid, refs, github, fileListWidth = $bindable(320), onfilelistresized, onjump }: Props = $props();
+  let {
+    oid,
+    refs,
+    github,
+    fileListWidth = $bindable(320),
+    onfilelistresized,
+    headerHeight = $bindable(null),
+    onheaderresized,
+    onjump,
+  }: Props = $props();
   let panes = $state<HTMLDivElement | null>(null);
   let panesWidth = $state(0);
   // Leave room for the diff whatever the window (or the sidebar) does.
@@ -65,6 +80,65 @@
     e.preventDefault();
     e.stopPropagation();
     onfilelistresized?.(w);
+  }
+
+  let root = $state<HTMLDivElement | null>(null);
+  let rootHeight = $state(0);
+  let header = $state<HTMLDivElement | null>(null);
+  // Leave room for a few rows of the file list / diff below the header.
+  const headerBounds: ResizeBounds = {
+    min: 40,
+    max: () => Math.max(40, (rootHeight || window.innerHeight) - 80),
+  };
+
+  $effect(() => {
+    const el = root;
+    if (!el) return;
+    const observer = new ResizeObserver(() => (rootHeight = el.clientHeight));
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  // Re-clamp both when the detail pane gets shorter and when the shell restores a saved height
+  // (the store is read asynchronously, possibly after the first resize notification).
+  $effect(() => {
+    if (headerHeight === null || !rootHeight) return;
+    const clamped = clampSize(headerHeight, headerBounds);
+    if (clamped !== headerHeight) headerHeight = clamped;
+  });
+
+  // While the header is still auto-sized, the first drag or key step starts from its rendered height.
+  function currentHeaderHeight(): number {
+    return headerHeight ?? header?.offsetHeight ?? headerBounds.min;
+  }
+
+  function startHeaderResize(e: PointerEvent) {
+    dragResize(e, {
+      ...headerBounds,
+      axis: "y",
+      start: currentHeaderHeight(),
+      onchange: (h) => (headerHeight = h),
+      ondone: (h) => onheaderresized?.(h),
+    });
+  }
+
+  function onHeaderKey(e: KeyboardEvent) {
+    const h = keyResize(e, {
+      ...headerBounds,
+      axis: "y",
+      current: currentHeaderHeight(),
+      onchange: (v) => (headerHeight = v),
+    });
+    if (h === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onheaderresized?.(h);
+  }
+
+  // Double-click goes back to fitting the content.
+  function resetHeaderHeight() {
+    headerHeight = null;
+    onheaderresized?.(null);
   }
 
   let detail = $state<CommitDetail | null>(null);
@@ -188,7 +262,7 @@
   }
 </script>
 
-<div class="flex h-full flex-col text-[13px]">
+<div class="flex h-full flex-col text-[13px]" bind:this={root}>
   {#if !oid}
     <div class="p-4 text-neutral-500">Select a commit to see its details.</div>
   {:else if error}
@@ -197,7 +271,9 @@
     <div class="p-4 text-neutral-500">Loading…</div>
   {:else}
     <div
-      class="selectable shrink-0 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700"
+      class="selectable shrink-0 px-3 py-2 {headerHeight === null ? '' : 'overflow-auto'}"
+      style={headerHeight === null ? undefined : `height:${headerHeight}px`}
+      bind:this={header}
     >
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
         <span
@@ -241,8 +317,26 @@
         </span>
       </div>
       <pre
-        class="mt-2 max-h-40 overflow-auto font-sans text-[13px] whitespace-pre-wrap">{detail.message.trim()}</pre>
+        class="mt-2 font-sans text-[13px] whitespace-pre-wrap {headerHeight === null
+          ? 'max-h-40 overflow-auto'
+          : ''}">{detail.message.trim()}</pre>
     </div>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <!-- A focusable separator is the WAI-ARIA window-splitter pattern; Svelte's a11y rules only know the static kind. -->
+    <div
+      class="h-1.5 shrink-0 cursor-row-resize touch-none bg-neutral-200 hover:bg-blue-400 focus:bg-blue-400 focus:outline-none dark:bg-neutral-700"
+      onpointerdown={startHeaderResize}
+      onkeydown={onHeaderKey}
+      ondblclick={resetHeaderHeight}
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="Resize commit message"
+      aria-valuenow={headerHeight ?? header?.offsetHeight}
+      aria-valuemin={headerBounds.min}
+      aria-valuemax={headerBounds.max()}
+      tabindex="0"
+      title="Drag to resize, double-click to fit the message"
+    ></div>
     <div class="flex min-h-0 flex-1" bind:this={panes}>
       <div class="shrink-0 overflow-auto py-1" style="width:{fileListWidth}px">
         {#each detail.files as file (file.path)}
