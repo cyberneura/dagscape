@@ -223,6 +223,9 @@
       focusSearch();
       return;
     }
+    // A focused audio / video preview (or the PDF frame's owner) uses the arrows and Home / End
+    // itself (volume, seeking); selecting another commit would unmount it mid-playback.
+    if (target instanceof HTMLMediaElement || target instanceof HTMLIFrameElement) return;
     if (!summary || summary.total === 0) return;
     const total = summary.total;
     const current = selected ?? -1;
