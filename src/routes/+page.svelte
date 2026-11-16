@@ -32,6 +32,8 @@
   let detailHeight = $state(320);
   let sidebarWidth = $state(224);
   let fileListWidth = $state(320);
+  // null = the commit header fits its content (the default until the separator is dragged).
+  let headerHeight = $state<number | null>(null);
   let showSidebar = $state(true);
   let list = $state<CommitList | undefined>();
   let searchInput = $state<HTMLInputElement | undefined>();
@@ -313,6 +315,10 @@
     void store?.set("fileListWidth", w);
   }
 
+  function saveHeaderHeight(h: number | null) {
+    void store?.set("headerHeight", h);
+  }
+
   function clampPanes() {
     windowWidth = window.innerWidth;
     windowHeight = window.innerHeight;
@@ -331,6 +337,7 @@
       detailHeight = (await store.get<number>("detailHeight")) ?? detailHeight;
       sidebarWidth = (await store.get<number>("sidebarWidth")) ?? sidebarWidth;
       fileListWidth = (await store.get<number>("fileListWidth")) ?? fileListWidth;
+      headerHeight = (await store.get<number | null>("headerHeight")) ?? headerHeight;
       clampPanes();
       unlisteners.push(await listen("repo-changed", () => reload()));
       unlisteners.push(await listen<string>("menu", (e) => onMenu(e.payload)));
@@ -472,6 +479,8 @@
             {github}
             bind:fileListWidth
             onfilelistresized={saveFileListWidth}
+            bind:headerHeight
+            onheaderresized={saveHeaderHeight}
             onjump={(oid) => selectOid(oid, true)}
           />
         </div>

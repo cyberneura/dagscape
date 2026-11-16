@@ -84,13 +84,15 @@ Events emitted to the webview: `repo-changed` (watcher), `menu` (payload: `open-
   `let x = $state<T | null>(null)`; the annotated form `let x: T | null = $state(null)` makes
   TypeScript narrow `x` to `null` forever.
 - Keyboard navigation is handled once, on `window`, in `+page.svelte`.
-- The three pane separators (sidebar | list, list / detail, file list | diff) resize through
+- The four pane separators (sidebar | list, list / detail, commit header / files, file list | diff) resize through
   `lib/resize.ts`: `dragResize` (pointer capture on the handle, ends on up / cancel / lost capture)
   and `keyResize` (focusable `role="separator"`, arrow keys / Home / End, 16 px steps). The sizes are
-  persisted in the settings store as `sidebarWidth` / `detailHeight` / `fileListWidth` (px) when a
+  persisted in the settings store as `sidebarWidth` / `detailHeight` / `headerHeight` / `fileListWidth` (px) when a
   drag or key step ends, and clamped to the same bounds on restore and when the window (or, for the
-  file list, its pane) shrinks. The file list's width is a `$bindable` prop of `CommitDetail`, so the
-  shell owns the store and the component owns the drag.
+  file list, its pane) shrinks. The file list's width and the commit header's height are `$bindable`
+  props of `CommitDetail`, so the shell owns the store and the component owns the drag.
+  `headerHeight` is `null` until the separator is first moved (and again after a double-click on it):
+  the header then fits its content with the message capped at `max-h-40`, as before it was resizable.
 - File paths in the detail's file list truncate at the *start* (`.truncate-start` in `app.css`:
   outer box `direction: rtl`, inner span isolated back to `ltr`), because the tail is what tells
   files apart.
