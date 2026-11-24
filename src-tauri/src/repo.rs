@@ -839,18 +839,70 @@ fn is_plain_relative(path: &str) -> bool {
     !path.is_empty() && Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
+/// git の設定ファイルの値を読む: 引用符の外の `#` / `;` 以降はコメント、引用符は外し、`\"` `\\` `\n` `\t` を戻す。
+/// 引用符の外の末尾の空白は値に含めない
+fn config_value(raw: &str) -> String {
+    let mut value = String::new();
+    // 引用符の中で終わった位置まで。それより後ろの (引用符の外の) 空白だけを最後に落とす
+    let mut keep = 0;
+    let mut quoted = false;
+    let mut chars = raw.trim_start().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                keep = value.len();
+            }
+            '\\' => {
+                match chars.next() {
+                    Some('n') => value.push('\n'),
+                    Some('t') => value.push('\t'),
+                    Some(other) => value.push(other),
+                    None => {}
+                }
+                keep = value.len();
+            }
+            '#' | ';' if !quoted => break,
+            _ => {
+                value.push(c);
+                if quoted {
+                    keep = value.len();
+                }
+            }
+        }
+    }
+    let trimmed = value[keep..].trim_end().len();
+    value.truncate(keep + trimmed);
+    value
+}
+
+/// `[submodule "name"]` の name。ほかの節や、名前の無い `[submodule]` は None
+fn submodule_section(line: &str) -> Option<String> {
+    let rest = line.strip_prefix('[')?.trim_start().strip_prefix("submodule")?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let mut name = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(name),
+            // 節名の中のエスケープは `\"` と `\\` だけ
+            '\\' => name.push(chars.next()?),
+            _ => name.push(c),
+        }
+    }
+    None
+}
+
 /// .gitmodules の中身から、path に置かれたサブモジュールの名前を引く。
 /// .git/modules の下は名前で保存されていて、`git mv` した後やクローン時に --name を付けた時はパスと違う
 fn submodule_name(gitmodules: &str, path: &str) -> Option<String> {
     let mut name: Option<String> = None;
     for line in gitmodules.lines() {
         let line = line.trim();
-        if let Some(section) = line.strip_prefix('[') {
-            name = section
-                .strip_prefix("submodule")
-                .map(|rest| rest.trim().trim_end_matches(']').trim().trim_matches('"').to_string());
+        if line.starts_with('[') {
+            name = submodule_section(line);
         } else if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "path" && value.trim().trim_matches('"') == path {
+            if key.trim().eq_ignore_ascii_case("path") && config_value(value) == path {
                 return name.filter(|n| !n.is_empty());
             }
         }
@@ -1544,6 +1596,13 @@ mod tests {
         assert_eq!(submodule_name(text, "vendor/lib").as_deref(), Some("libs/renamed"));
         assert_eq!(submodule_name(text, "other/dir").as_deref(), Some("other"));
         assert_eq!(submodule_name(text, "missing"), None);
+        // git の設定ファイルの書き方: 行末のコメント、引用符、エスケープ、大文字のキー
+        let text = "[submodule \"a \\\"b\\\"\"] ; note\n\tPath = \"dir with space\" # here\n[core]\n\tpath = x\n[submodule \"c\"]\n\tpath = plain ; trailing\n";
+        assert_eq!(submodule_name(text, "dir with space").as_deref(), Some("a \"b\""));
+        assert_eq!(submodule_name(text, "plain").as_deref(), Some("c"));
+        assert_eq!(submodule_name(text, "x"), None);
+        assert_eq!(config_value(" a\\tb  "), "a\tb");
+        assert_eq!(config_value("\"keep  \"  "), "keep  ");
     }
 
     #[test]
