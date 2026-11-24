@@ -15,7 +15,7 @@ use serde::Serialize;
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder};
 
-use repo::{CommitDetail, FileDiff, FileInfo, Graph, HeadInfo, RefInfo, RemoteInfo, Row};
+use repo::{CommitDetail, FileDiff, FileInfo, Graph, HeadInfo, RefInfo, RemoteInfo, Row, SubmoduleChange};
 
 struct Session {
     repo: git2::Repository,
@@ -35,6 +35,8 @@ struct AppState {
     open_ticket: AtomicU64,
     /// get_file_info の受付番号。ファイルを次々に選んだ時、古い要求の履歴探索を途中で止める
     file_info_ticket: Arc<AtomicU64>,
+    /// get_submodule_change の受付番号。同じく、古い要求の祖先判定と差分を途中で止める
+    submodule_ticket: Arc<AtomicU64>,
     installed_ticket: AtomicU64,
 }
 
@@ -163,7 +165,7 @@ async fn get_file_info(
     let latest = state.file_info_ticket.clone();
     let ticket = latest.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || {
-        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        let repo = repo::reopen(&git_dir)?;
         let superseded = || latest.load(Ordering::SeqCst) != ticket;
         repo::file_info(&repo, &oid, &path, old_path.as_deref(), &superseded)
     })
@@ -189,12 +191,59 @@ async fn get_blob(
 ) -> Result<tauri::ipc::Response, String> {
     let git_dir = session_git_dir(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        let repo = repo::reopen(&git_dir)?;
         repo::blob_bytes(&repo, &oid, &path, old_path.as_deref(), &side)
     })
     .await
     .map_err(|e| e.to_string())?
     .map(tauri::ipc::Response::new)
+}
+
+/// サブモジュールを動かしたコミットの、サブモジュール側の中身 (旧 / 新コミット、間のコミット、差分)。
+/// ブランチごとの祖先判定とツリーの差分が走るので、get_file_info と同じく別のハンドル・別スレッドで読み、
+/// 次の要求が来たら古い方を途中で止める
+#[tauri::command]
+async fn get_submodule_change(
+    state: State<'_, AppState>,
+    oid: String,
+    path: String,
+    old_path: Option<String>,
+) -> Result<SubmoduleChange, String> {
+    let git_dir = session_git_dir(&state)?;
+    let latest = state.submodule_ticket.clone();
+    let ticket = latest.fetch_add(1, Ordering::SeqCst) + 1;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = repo::reopen(&git_dir)?;
+        let superseded = || latest.load(Ordering::SeqCst) != ticket;
+        repo::submodule_change(&repo, &oid, &path, old_path.as_deref(), &superseded)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// コミット oid が動かした path のサブモジュールを、新しい Dagscape のウインドウ (別プロセス) で開く。
+/// 1 つのプロセスが開けるリポジトリは 1 つなので、`dagscape` コマンドと同じ起動のしかたをする。
+/// プロセスを起動するコマンドなので、webview から任意のパスは受けず (開く先は開いているリポジトリから
+/// 引き直す)、main 以外のウインドウ (Third-Party Licenses) からは呼ばせない
+#[tauri::command]
+async fn open_submodule_window(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    oid: String,
+    path: String,
+    old_path: Option<String>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Not available in this window".to_string());
+    }
+    let git_dir = session_git_dir(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = repo::reopen(&git_dir)?;
+        let location = repo::submodule_location(&repo, &oid, &path, old_path.as_deref())?;
+        cli::launch_app(&location)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -435,6 +484,8 @@ pub fn run() {
             get_file_diff,
             get_file_info,
             get_blob,
+            get_submodule_change,
+            open_submodule_window,
             search_commits,
             row_index_of,
             initial_path,

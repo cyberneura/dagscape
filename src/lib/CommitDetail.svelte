@@ -6,9 +6,12 @@
     type FileChange,
     type FileDiff,
     type RefLabel,
+    type Signature,
   } from "./api";
+  import { chipClass, lineClass, statusClass } from "./diffStyle";
   import { formatDateTime } from "./format";
   import FilePreview from "./FilePreview.svelte";
+  import SubmoduleDetail from "./SubmoduleDetail.svelte";
   import { previewType } from "./filePreview";
   import { showLinkMenu, type GitHub, type LinkItem } from "./github";
   import { clampSize, dragResize, keyResize, type ResizeBounds } from "./resize";
@@ -191,52 +194,6 @@
     };
   });
 
-  const committerDiffers = $derived(
-    detail !== null &&
-      (detail.author.email !== detail.committer.email ||
-        detail.author.time !== detail.committer.time),
-  );
-
-  function statusClass(status: string): string {
-    switch (status) {
-      case "A":
-        return "text-emerald-600 dark:text-emerald-400";
-      case "D":
-        return "text-red-600 dark:text-red-400";
-      case "R":
-      case "C":
-        return "text-sky-600 dark:text-sky-400";
-      default:
-        return "text-amber-600 dark:text-amber-400";
-    }
-  }
-
-  function lineClass(kind: DiffLine["kind"]): string {
-    switch (kind) {
-      case "add":
-        return "bg-emerald-500/15 text-emerald-800 dark:text-emerald-200";
-      case "del":
-        return "bg-red-500/15 text-red-800 dark:text-red-200";
-      case "hunk":
-        return "bg-sky-500/10 text-sky-700 dark:text-sky-300";
-      default:
-        return "";
-    }
-  }
-
-  function chipClass(ref: RefLabel): string {
-    switch (ref.kind) {
-      case "head":
-        return "bg-neutral-800 text-white dark:bg-neutral-200 dark:text-black";
-      case "branch":
-        return "bg-emerald-600/85 text-white";
-      case "remote":
-        return "bg-sky-600/85 text-white";
-      case "tag":
-        return "bg-amber-400 text-black";
-    }
-  }
-
   // 削除されたファイル・削除行は、このコミットには無いので第 1 親の版を開く
   function fileLinks(d: CommitDetail, file: FileChange, line?: DiffLine): LinkItem[] {
     const parent = d.parents[0] ?? null;
@@ -259,8 +216,8 @@
     ];
   }
 
-  function signatureText(sig: CommitDetail["author"]): string {
-    return `${sig.name} <${sig.email}> · ${formatDateTime(sig.time)}`;
+  function person(sig: Signature): string {
+    return `${sig.name} <${sig.email}>`;
   }
 </script>
 
@@ -287,7 +244,7 @@
         >
         {#each refs as ref (ref.kind + ref.name)}
           <span
-            class="chip {chipClass(ref)}"
+            class="chip {chipClass(ref.kind)}"
             role="note"
             oncontextmenu={(e) =>
               detail && showLinkMenu(e, [{ text: `Open ${ref.name} on GitHub`, url: github.refUrl(ref, detail.oid) }])}
@@ -295,28 +252,43 @@
           >
         {/each}
       </div>
-      <div
-        class="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-neutral-600 dark:text-neutral-300"
-      >
-        <span class="text-neutral-400">Author</span>
-        <span>{signatureText(detail.author)}</span>
-        {#if committerDiffers}
-          <span class="text-neutral-400">Committer</span>
-          <span>{signatureText(detail.committer)}</span>
-        {/if}
-        <span class="text-neutral-400">Parents</span>
-        <span>
-          {#each detail.parents as parent (parent)}
-            <button
-              class="mr-2 cursor-pointer font-mono text-sky-600 hover:underline dark:text-sky-400"
-              onclick={() => onjump(parent)}
-              oncontextmenu={(e) => showLinkMenu(e, [{ text: "Open Commit on GitHub", url: github.commitUrl(parent) }])}
-              >{parent.slice(0, 7)}</button
-            >
-          {:else}
-            <span class="text-neutral-400">(root commit)</span>
-          {/each}
-        </span>
+      <!--
+        Two label / value pairs per row once the pane is wide enough (a container query, because the
+        sidebar takes its share of the window): when and from what on the left, by whom on the right.
+        The second pair's label carries extra left padding so it does not read as part of the first
+        pair's value, and the first value is capped (fit-content) so an octopus merge's parents wrap
+        instead of squeezing the names. "Committed at" is the committer date; the author date differs after a rebase,
+        cherry-pick or amend, and is then shown next to the author rather than dropped.
+      -->
+      <div class="@container mt-1">
+        <div
+          class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs text-neutral-600 @xl:grid-cols-[auto_fit-content(45%)_auto_minmax(0,1fr)] dark:text-neutral-300"
+        >
+          <span class="whitespace-nowrap text-neutral-400">Committed at</span>
+          <span class="whitespace-nowrap">{formatDateTime(detail.committer.time)}</span>
+          <span class="text-neutral-400 @xl:pl-8">Author</span>
+          <span>
+            {person(detail.author)}
+            {#if detail.author.time !== detail.committer.time}
+              <span class="whitespace-nowrap text-neutral-400">· authored {formatDateTime(detail.author.time)}</span>
+            {/if}
+          </span>
+          <span class="text-neutral-400">Parents</span>
+          <span>
+            {#each detail.parents as parent (parent)}
+              <button
+                class="mr-2 cursor-pointer font-mono text-sky-600 hover:underline dark:text-sky-400"
+                onclick={() => onjump(parent)}
+                oncontextmenu={(e) => showLinkMenu(e, [{ text: "Open Commit on GitHub", url: github.commitUrl(parent) }])}
+                >{parent.slice(0, 7)}</button
+              >
+            {:else}
+              <span class="text-neutral-400">(root commit)</span>
+            {/each}
+          </span>
+          <span class="text-neutral-400 @xl:pl-8">Committer</span>
+          <span>{person(detail.committer)}</span>
+        </div>
       </div>
       <pre
         class="mt-2 font-sans text-[13px] whitespace-pre-wrap {headerHeight === null
@@ -385,7 +357,7 @@
         tabindex="0"
       ></div>
       <div class="selectable min-w-0 flex-1 overflow-auto font-mono text-xs leading-5">
-        {#if selectedFile}
+        {#if selectedFile && !selectedFile.submodule}
           {#key selectedFile}
             <FilePreview oid={detail.oid} file={selectedFile} {onjump} />
           {/key}
@@ -417,6 +389,12 @@
           {/if}
         {:else if selectedFile}
           <div class="p-2 text-neutral-500">Loading…</div>
+        {/if}
+        <!-- Below the two "Subproject commit" lines: what those two hashes are, and what lies between them. -->
+        {#if selectedFile?.submodule}
+          {#key selectedFile}
+            <SubmoduleDetail oid={detail.oid} file={selectedFile} />
+          {/key}
         {/if}
       </div>
     </div>

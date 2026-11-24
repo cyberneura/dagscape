@@ -103,6 +103,9 @@ pub struct FileChange {
     pub additions: usize,
     pub deletions: usize,
     pub binary: bool,
+    /// サブモジュール (gitlink)。差分は「Subproject commit <hash>」の 2 行にしかならないので、
+    /// フロントは get_submodule_change で中身を取りに行く
+    pub submodule: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -139,7 +142,23 @@ const MAX_DIFF_LINES: usize = 50_000;
 const MAX_SEARCH_HITS: usize = 20_000;
 
 pub fn open(path: &Path) -> Result<Repository, String> {
-    Repository::discover(path).map_err(|e| format!("Not a git repository: {} ({})", path.display(), e.message()))
+    Repository::discover(path)
+        .or_else(|e| open_without_worktree(path).ok_or(e))
+        .map_err(|e| format!("Not a git repository: {} ({})", path.display(), e.message()))
+}
+
+/// 開いているリポジトリを、別スレッド用にもう 1 つのハンドルで開き直す。git_dir は `Repository::path()`
+pub fn reopen(git_dir: &Path) -> Result<Repository, String> {
+    Repository::open(git_dir)
+        .or_else(|e| open_without_worktree(git_dir).ok_or(e))
+        .map_err(|e| e.message().to_string())
+}
+
+/// 消されたサブモジュールが .git/modules に残したリポジトリは、core.worktree が無くなった作業ツリーを
+/// 指したままで、libgit2 は普通には開けない (作業ツリーの解決で失敗する)。履歴は読めるので、
+/// git dir そのものを渡された時に限り、作業ツリー無しで開く
+fn open_without_worktree(git_dir: &Path) -> Option<Repository> {
+    Repository::open_bare(git_dir).ok()
 }
 
 /// 表示用のパス。作業ツリーがあればその親、bare なら .git 自体。
@@ -485,11 +504,40 @@ pub fn commit_detail(repo: &Repository, oid: &str) -> Result<CommitDetail, Strin
                 additions,
                 deletions,
                 binary: binary || delta.flags().is_binary(),
+                submodule: delta.new_file().mode() == git2::FileMode::Commit
+                    || delta.old_file().mode() == git2::FileMode::Commit,
             }
         })
         .collect();
 
     Ok(header(files, None))
+}
+
+fn hunk_line(hunk: &git2::DiffHunk<'_>) -> DiffLine {
+    DiffLine {
+        kind: "hunk",
+        old_no: None,
+        new_no: None,
+        text: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
+    }
+}
+
+/// 追加 / 削除 / 文脈の行。"\ No newline at end of file" 等は本文に混ぜないので None
+fn content_line(line: &git2::DiffLine<'_>) -> Option<DiffLine> {
+    let kind = match line.origin() {
+        '+' => "add",
+        '-' => "del",
+        ' ' => "ctx",
+        _ => return None,
+    };
+    Some(DiffLine {
+        kind,
+        old_no: line.old_lineno(),
+        new_no: line.new_lineno(),
+        text: String::from_utf8_lossy(line.content())
+            .trim_end_matches(['\n', '\r'])
+            .to_string(),
+    })
 }
 
 pub fn file_diff(
@@ -529,29 +577,13 @@ pub fn file_diff(
             true
         }),
         Some(&mut |_, hunk| {
-            push(DiffLine {
-                kind: "hunk",
-                old_no: None,
-                new_no: None,
-                text: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
-            })
+            push(hunk_line(&hunk))
         }),
         Some(&mut |_, _, line| {
-            let kind = match line.origin() {
-                '+' => "add",
-                '-' => "del",
-                ' ' => "ctx",
-                // "\ No newline at end of file" 等は本文に混ぜない
-                _ => return true,
-            };
-            push(DiffLine {
-                kind,
-                old_no: line.old_lineno(),
-                new_no: line.new_lineno(),
-                text: String::from_utf8_lossy(line.content())
-                    .trim_end_matches(['\n', '\r'])
-                    .to_string(),
-            })
+            match content_line(&line) {
+                Some(line) => push(line),
+                None => true,
+            }
         }),
     );
     // コールバックが false を返して止めた (行数上限) 時だけ Err を許容する。blob 欠損等は返す
@@ -733,6 +765,486 @@ pub fn blob_bytes(
     }
     let blob = repo.find_blob(id).map_err(|e| e.message().to_string())?;
     Ok(blob.content().to_vec())
+}
+
+/// サブモジュールの変更で列挙するコミット数の上限 (旧 → 新の間)
+const MAX_SUBMODULE_COMMITS: usize = 200;
+/// サブモジュールの差分の行数の上限 (全ファイルの合計)。1 ファイルの MAX_DIFF_LINES より小さいのは、
+/// 選んだだけで全ファイル分を 1 回の IPC で運ぶため
+const MAX_SUBMODULE_DIFF_LINES: usize = 20_000;
+/// 行数が少なくても 1 行が巨大 (生成物・minify 済み) だと IPC が膨らむので、本文の合計バイト数でも切る
+const MAX_SUBMODULE_DIFF_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SUBMODULE_FILES: usize = 2_000;
+/// 「このコミットを含むブランチ」を調べる ref の数の上限。ref ごとに祖先判定が走る
+const MAX_SUBMODULE_REFS: usize = 300;
+const MAX_CONTAINING_BRANCHES: usize = 20;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmoduleRef {
+    pub name: String,
+    pub kind: RefKind,
+}
+
+/// サブモジュール側のコミット 1 つ (親リポジトリが指していた / 指すようになったコミット)
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmoduleCommit {
+    pub oid: String,
+    pub short: String,
+    pub author: Signature,
+    pub committer: Signature,
+    pub message: String,
+    /// このコミットを直接指しているブランチ・タグ
+    pub refs: Vec<SubmoduleRef>,
+    /// 先端ではないが、このコミットを履歴に含むブランチ (MAX_CONTAINING_BRANCHES まで)
+    pub contained_in: Vec<String>,
+    pub contained_in_truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmoduleLogEntry {
+    pub oid: String,
+    pub short: String,
+    pub summary: String,
+    pub author: String,
+    pub time: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmoduleFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub binary: bool,
+    pub lines: Vec<DiffLine>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SubmoduleChange {
+    /// 親リポジトリが記録しているコミット。足された時は old、消された時は new が None
+    pub old_oid: Option<String>,
+    pub new_oid: Option<String>,
+    /// サブモジュールのリポジトリを開けた時の、その場所 (新しいウインドウで開く先)。
+    /// init されていない等で開けなければ None で、以降の項目は全部空
+    pub repo_path: Option<String>,
+    /// コミットがサブモジュールのリポジトリに無い (fetch されていない) 時は None
+    pub old: Option<SubmoduleCommit>,
+    pub new: Option<SubmoduleCommit>,
+    /// old から new で増えた / 減ったコミット数。どちらかのコミットが無ければ None
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
+    /// 増えたコミット (新しい順、MAX_SUBMODULE_COMMITS まで)
+    pub commits: Vec<SubmoduleLogEntry>,
+    pub commits_truncated: bool,
+    /// old と new のツリーの差分。両方のコミットがある時だけ
+    pub files: Vec<SubmoduleFile>,
+    pub diff_truncated: bool,
+    pub diff_error: Option<String>,
+}
+
+/// tree の中の path にある gitlink (サブモジュール) が指すコミット
+fn gitlink_at(tree: &git2::Tree<'_>, path: &str) -> Option<Oid> {
+    let entry = tree.get_path(Path::new(path)).ok()?;
+    (entry.filemode() == i32::from(git2::FileMode::Commit)).then(|| entry.id())
+}
+
+/// IPC で受けたパスを作業ツリーや .git/modules に連結する前の検査。ツリーオブジェクトは生のバイト列なので、
+/// 細工したリポジトリなら ".." という名前のエントリを持てる
+fn is_plain_relative(path: &str) -> bool {
+    !path.is_empty() && Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// git の設定ファイルの値を読む: 引用符の外の `#` / `;` 以降はコメント、引用符は外し、`\"` `\\` `\n` `\t` を戻す。
+/// 引用符の外の末尾の空白は値に含めない
+fn config_value(raw: &str) -> String {
+    let mut value = String::new();
+    // 引用符の中で終わった位置まで。それより後ろの (引用符の外の) 空白だけを最後に落とす
+    let mut keep = 0;
+    let mut quoted = false;
+    let mut chars = raw.trim_start().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                keep = value.len();
+            }
+            '\\' => {
+                match chars.next() {
+                    Some('n') => value.push('\n'),
+                    Some('t') => value.push('\t'),
+                    Some(other) => value.push(other),
+                    None => {}
+                }
+                keep = value.len();
+            }
+            '#' | ';' if !quoted => break,
+            _ => {
+                value.push(c);
+                if quoted {
+                    keep = value.len();
+                }
+            }
+        }
+    }
+    let trimmed = value[keep..].trim_end().len();
+    value.truncate(keep + trimmed);
+    value
+}
+
+/// `[submodule "name"]` の name。ほかの節や、名前の無い `[submodule]` は None
+fn submodule_section(line: &str) -> Option<String> {
+    let rest = line.strip_prefix('[')?.trim_start().strip_prefix("submodule")?;
+    let rest = rest.trim_start().strip_prefix('"')?;
+    let mut name = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(name),
+            // 節名の中のエスケープは `\"` と `\\` だけ
+            '\\' => name.push(chars.next()?),
+            _ => name.push(c),
+        }
+    }
+    None
+}
+
+/// .gitmodules の中身から、path に置かれたサブモジュールの名前を引く。
+/// .git/modules の下は名前で保存されていて、`git mv` した後やクローン時に --name を付けた時はパスと違う
+fn submodule_name(gitmodules: &str, path: &str) -> Option<String> {
+    let mut name: Option<String> = None;
+    for line in gitmodules.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            name = submodule_section(line);
+        } else if let Some((key, value)) = line.split_once('=') {
+            if key.trim().eq_ignore_ascii_case("path") && config_value(value) == path {
+                return name.filter(|n| !n.is_empty());
+            }
+        }
+    }
+    None
+}
+
+/// 開けたサブモジュールと、それを新しいウインドウで開く時に渡す場所
+struct OpenedSubmodule {
+    repo: Repository,
+    location: PathBuf,
+}
+
+/// サブモジュールのリポジトリ。作業ツリーにチェックアウトされていればそれを、無ければ
+/// (履歴の途中で消されたサブモジュール、deinit 済み等) .git/modules に残っているものを開く。
+/// tree は path をサブモジュールとして持つ側のツリーで、その .gitmodules から名前を引く。
+/// Repository::open は上の階層を探さないので、init されていない空ディレクトリから親リポジトリ自身を
+/// 開いてしまうことは無い
+fn open_submodule(repo: &Repository, tree: &git2::Tree<'_>, path: &str) -> Option<OpenedSubmodule> {
+    if !is_plain_relative(path) {
+        return None;
+    }
+    if let Some(workdir) = repo.workdir() {
+        let dir = workdir.join(path);
+        // 途中が symlink / junction で、作業ツリーの外の無関係なリポジトリを指していたら開かない
+        let inside = match (dir.canonicalize(), workdir.canonicalize()) {
+            (Ok(dir), Ok(workdir)) => dir.starts_with(workdir),
+            _ => false,
+        };
+        if inside {
+            if let Ok(sub) = Repository::open(&dir) {
+                let location = display_path(&sub);
+                return Some(OpenedSubmodule { repo: sub, location });
+            }
+        }
+    }
+    let name = tree
+        .get_path(Path::new(".gitmodules"))
+        .ok()
+        .and_then(|entry| repo.find_blob(entry.id()).ok())
+        .and_then(|blob| submodule_name(&String::from_utf8_lossy(blob.content()), path))
+        .filter(|name| is_plain_relative(name))
+        .unwrap_or_else(|| path.to_string());
+    // linked worktree のサブモジュールは、その worktree 用の git dir の下にある。無ければ共通の方
+    let mut git_dirs = vec![repo.path().to_path_buf()];
+    if repo.commondir() != repo.path() {
+        git_dirs.push(repo.commondir().to_path_buf());
+    }
+    git_dirs.into_iter().find_map(|git_dir| {
+        // core.worktree は消えた作業ツリーを指したまま (rm) か、設定ごと無い (deinit) ので、作業ツリー無しで開く。
+        // 後者で libgit2 に作業ツリーを推測させると git dir の親になり、それを渡した新しいウインドウが
+        // 親リポジトリを開いてしまう。場所も git dir そのものにする
+        let sub = Repository::open_bare(git_dir.join("modules").join(&name)).ok()?;
+        let location = PathBuf::from(sub.path().to_string_lossy().trim_end_matches(['/', '\\']));
+        Some(OpenedSubmodule { repo: sub, location })
+    })
+}
+
+fn submodule_commit(sub: &Repository, oid: Oid, should_stop: &dyn Fn() -> bool) -> Option<SubmoduleCommit> {
+    let commit = sub.find_commit(oid).ok()?;
+    let hex = oid.to_string();
+    let author = signature(&commit.author());
+    let committer = signature(&commit.committer());
+    let mut refs = Vec::new();
+    let mut contained_in = Vec::new();
+    let mut contained_in_truncated = false;
+    if let Ok(references) = sub.references() {
+        let mut checked = 0usize;
+        for reference in references.flatten() {
+            let Ok(full_name) = reference.name() else { continue };
+            let (kind, name) = if let Some(name) = full_name.strip_prefix("refs/heads/") {
+                (RefKind::Branch, name)
+            } else if let Some(name) = full_name.strip_prefix("refs/remotes/") {
+                if name.ends_with("/HEAD") {
+                    continue;
+                }
+                (RefKind::Remote, name)
+            } else if let Some(name) = full_name.strip_prefix("refs/tags/") {
+                (RefKind::Tag, name)
+            } else {
+                continue;
+            };
+            let Ok(tip) = reference.peel_to_commit() else { continue };
+            if tip.id() == oid {
+                refs.push(SubmoduleRef { name: name.to_string(), kind });
+            } else if kind != RefKind::Tag {
+                if contained_in.len() >= MAX_CONTAINING_BRANCHES || checked >= MAX_SUBMODULE_REFS {
+                    contained_in_truncated = true;
+                    continue;
+                }
+                // 別のファイルが選ばれたら、残りの祖先判定はしない (結果は捨てられる)
+                if should_stop() {
+                    break;
+                }
+                checked += 1;
+                if sub.graph_descendant_of(tip.id(), oid).unwrap_or(false) {
+                    contained_in.push(name.to_string());
+                }
+            }
+        }
+    }
+    refs.sort_by(|a, b| a.name.cmp(&b.name));
+    contained_in.sort();
+    Some(SubmoduleCommit {
+        short: hex[..7].to_string(),
+        oid: hex,
+        author,
+        committer,
+        message: commit.message().unwrap_or("").to_string(),
+        refs,
+        contained_in,
+        contained_in_truncated,
+    })
+}
+
+/// old..new のコミット (新しい順)。上限を超えたら truncated
+fn submodule_log(sub: &Repository, old: Oid, new: Oid) -> Result<(Vec<SubmoduleLogEntry>, bool), String> {
+    let err = |e: git2::Error| e.message().to_string();
+    let mut walk = sub.revwalk().map_err(err)?;
+    walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME).map_err(err)?;
+    walk.push(new).map_err(err)?;
+    walk.hide(old).map_err(err)?;
+    let mut commits = Vec::new();
+    for oid in walk {
+        let oid = oid.map_err(err)?;
+        if commits.len() >= MAX_SUBMODULE_COMMITS {
+            return Ok((commits, true));
+        }
+        let commit = sub.find_commit(oid).map_err(err)?;
+        let hex = oid.to_string();
+        commits.push(SubmoduleLogEntry {
+            short: hex[..7].to_string(),
+            oid: hex,
+            summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
+            author: commit.author().name().unwrap_or("").to_string(),
+            time: commit.committer().when().seconds(),
+        });
+    }
+    Ok((commits, false))
+}
+
+/// サブモジュール内の old → new のツリーの差分を、ファイルごとの行にして返す
+fn submodule_diff(
+    sub: &Repository,
+    old: Oid,
+    new: Oid,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<(Vec<SubmoduleFile>, bool), String> {
+    let err = |e: git2::Error| e.message().to_string();
+    let old_tree = sub.find_commit(old).map_err(err)?.tree().map_err(err)?;
+    let new_tree = sub.find_commit(new).map_err(err)?.tree().map_err(err)?;
+    let mut diff = sub
+        .diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)
+        .map_err(err)?;
+    diff.find_similar(Some(DiffFindOptions::new().renames(true)))
+        .map_err(err)?;
+
+    let files: RefCell<Vec<SubmoduleFile>> = RefCell::new(Vec::new());
+    let total_lines = Cell::new(0usize);
+    let total_bytes = Cell::new(0usize);
+    let truncated = Cell::new(false);
+    let push_line = |line: DiffLine| {
+        if total_lines.get() >= MAX_SUBMODULE_DIFF_LINES
+            || total_bytes.get() + line.text.len() > MAX_SUBMODULE_DIFF_BYTES
+            || should_stop()
+        {
+            truncated.set(true);
+            return false;
+        }
+        total_lines.set(total_lines.get() + 1);
+        total_bytes.set(total_bytes.get() + line.text.len());
+        if let Some(file) = files.borrow_mut().last_mut() {
+            match line.kind {
+                "add" => file.additions += 1,
+                "del" => file.deletions += 1,
+                _ => {}
+            }
+            file.lines.push(line);
+        }
+        true
+    };
+    let result = diff.foreach(
+        &mut |delta, _| {
+            let mut files = files.borrow_mut();
+            if files.len() >= MAX_SUBMODULE_FILES {
+                truncated.set(true);
+                return false;
+            }
+            let status = delta.status();
+            files.push(SubmoduleFile {
+                path: if status == Delta::Deleted {
+                    delta_path(delta.old_file())
+                } else {
+                    delta_path(delta.new_file())
+                },
+                old_path: matches!(status, Delta::Renamed | Delta::Copied).then(|| delta_path(delta.old_file())),
+                status: status_letter(status).to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: delta.flags().is_binary(),
+                lines: Vec::new(),
+            });
+            true
+        },
+        Some(&mut |_, _| {
+            if let Some(file) = files.borrow_mut().last_mut() {
+                file.binary = true;
+            }
+            true
+        }),
+        Some(&mut |_, hunk| {
+            push_line(hunk_line(&hunk))
+        }),
+        Some(&mut |_, _, line| {
+            match content_line(&line) {
+                Some(line) => push_line(line),
+                None => true,
+            }
+        }),
+    );
+    // file_diff と同じく、上限で止めた時の Err だけ許容する
+    if let Err(e) = result {
+        if !truncated.get() {
+            return Err(e.message().to_string());
+        }
+    }
+    Ok((files.into_inner(), truncated.get()))
+}
+
+/// コミットが動かしたサブモジュールの、旧 / 新コミットと、サブモジュールのリポジトリ (開けなければ None)
+struct LocatedSubmodule {
+    old_id: Option<Oid>,
+    new_id: Option<Oid>,
+    opened: Option<OpenedSubmodule>,
+}
+
+/// Err にするのは path がこのコミットでサブモジュールでない時だけ
+fn locate_submodule(
+    repo: &Repository,
+    oid: &str,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<LocatedSubmodule, String> {
+    let commit = find_commit(repo, oid)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let parent_tree = first_parent_tree(&commit)?;
+    let old_path = old_path.unwrap_or(path);
+    let new_id = gitlink_at(&tree, path);
+    let old_id = parent_tree.as_ref().and_then(|t| gitlink_at(t, old_path));
+    let opened = match (new_id, old_id, parent_tree.as_ref()) {
+        (Some(_), _, _) => open_submodule(repo, &tree, path),
+        // 消されたサブモジュールは、親の側の旧パスと .gitmodules にある
+        (None, Some(_), Some(parent_tree)) => open_submodule(repo, parent_tree, old_path),
+        _ => return Err(format!("{path} is not a submodule in this commit")),
+    };
+    Ok(LocatedSubmodule { old_id, new_id, opened })
+}
+
+/// 新しいウインドウで開く先。webview から任意のパスを受けず、開いているリポジトリのコミットから引き直す
+pub fn submodule_location(repo: &Repository, oid: &str, path: &str, old_path: Option<&str>) -> Result<PathBuf, String> {
+    locate_submodule(repo, oid, path, old_path)?
+        .opened
+        .map(|sub| sub.location)
+        .ok_or_else(|| format!("{path} is not checked out"))
+}
+
+/// コミット oid が path のサブモジュールをどう動かしたか: 旧 / 新コミットの情報、間のコミット、差分。
+/// サブモジュールのリポジトリが手元に無い・コミットが fetch されていない時は、分かる範囲だけを返す。
+/// should_stop が true を返したら (別のファイルが選ばれた) Err で打ち切る
+pub fn submodule_change(
+    repo: &Repository,
+    oid: &str,
+    path: &str,
+    old_path: Option<&str>,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<SubmoduleChange, String> {
+    let cancelled = || Err("Cancelled".to_string());
+    let LocatedSubmodule { old_id, new_id, opened } = locate_submodule(repo, oid, path, old_path)?;
+    let mut change = SubmoduleChange {
+        old_oid: old_id.map(|id| id.to_string()),
+        new_oid: new_id.map(|id| id.to_string()),
+        repo_path: None,
+        old: None,
+        new: None,
+        ahead: None,
+        behind: None,
+        commits: Vec::new(),
+        commits_truncated: false,
+        files: Vec::new(),
+        diff_truncated: false,
+        diff_error: None,
+    };
+    let Some(OpenedSubmodule { repo: sub, location }) = opened else {
+        return Ok(change);
+    };
+    change.repo_path = Some(location.to_string_lossy().into_owned());
+    change.old = old_id.and_then(|id| submodule_commit(&sub, id, should_stop));
+    change.new = new_id.and_then(|id| submodule_commit(&sub, id, should_stop));
+    if should_stop() {
+        return cancelled();
+    }
+    if let (Some(old), Some(new), true, true) = (old_id, new_id, change.old.is_some(), change.new.is_some()) {
+        if let Ok((ahead, behind)) = sub.graph_ahead_behind(new, old) {
+            change.ahead = Some(ahead);
+            change.behind = Some(behind);
+        }
+        // 一覧が取れなくても増減の数と差分は出せるので、失敗は一覧が空になるだけにする
+        if let Ok((commits, truncated)) = submodule_log(&sub, old, new) {
+            change.commits = commits;
+            change.commits_truncated = truncated;
+        }
+        if should_stop() {
+            return cancelled();
+        }
+        match submodule_diff(&sub, old, new, should_stop) {
+            Ok((files, truncated)) => {
+                change.files = files;
+                change.diff_truncated = truncated;
+            }
+            Err(e) => change.diff_error = Some(e),
+        }
+        if should_stop() {
+            return cancelled();
+        }
+    }
+    Ok(change)
 }
 
 #[cfg(test)]
@@ -984,5 +1496,174 @@ mod tests {
         let result = file_info(&repo, &head, "a.txt", None, &|| true);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(result.is_err());
+    }
+
+    /// lib (サブモジュールの元) と、それを `vendor/lib` に持つ親リポジトリ。
+    /// 親は「サブモジュールを足す」「2 コミット進める」の 2 コミット。返すのは (親, 進める前, 進めた後)
+    fn build_submodule_fixture(label: &str) -> (PathBuf, String, String) {
+        let lib = temp_repo(&format!("{label}_lib"));
+        git(&lib, &["init", "-q", "-b", "main"]);
+        write(&lib, "lib.txt", "one\n");
+        git(&lib, &["add", "."]);
+        git(&lib, &["commit", "-q", "-m", "lib first"]);
+        let old = git(&lib, &["rev-parse", "HEAD"]);
+
+        let dir = temp_repo(label);
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(
+            &dir,
+            &["-c", "protocol.file.allow=always", "submodule", "-q", "add", lib.to_str().unwrap(), "vendor/lib"],
+        );
+        git(&dir, &["commit", "-q", "-m", "add submodule"]);
+
+        let sub = dir.join("vendor/lib");
+        write(&sub, "lib.txt", "one\ntwo\n");
+        git(&sub, &["commit", "-q", "-am", "lib second"]);
+        write(&sub, "new.txt", "new\n");
+        git(&sub, &["add", "."]);
+        git(&sub, &["commit", "-q", "-m", "lib third"]);
+        git(&sub, &["tag", "lib-v2"]);
+        let new = git(&sub, &["rev-parse", "HEAD"]);
+        git(&dir, &["commit", "-q", "-am", "bump submodule"]);
+        (dir, old, new)
+    }
+
+    #[test]
+    fn submodule_change_reports_commits_and_diff() {
+        let (dir, old, new) = build_submodule_fixture("submodule");
+        let repo = open(&dir).unwrap();
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let detail = commit_detail(&repo, &head).unwrap();
+        assert_eq!(detail.files.len(), 1);
+        assert!(detail.files[0].submodule);
+        assert_eq!(detail.files[0].path, "vendor/lib");
+
+        let change = submodule_change(&repo, &head, "vendor/lib", None, &|| false).unwrap();
+        assert_eq!(change.old_oid.as_deref(), Some(old.as_str()));
+        assert_eq!(change.new_oid.as_deref(), Some(new.as_str()));
+        assert!(change.repo_path.as_deref().unwrap().ends_with("lib"));
+        assert_eq!((change.ahead, change.behind), (Some(2), Some(0)));
+        let summaries: Vec<&str> = change.commits.iter().map(|c| c.summary.as_str()).collect();
+        assert_eq!(summaries, ["lib third", "lib second"]);
+        assert!(!change.commits_truncated);
+
+        let new_commit = change.new.unwrap();
+        assert_eq!(new_commit.message.trim(), "lib third");
+        assert_eq!(new_commit.author.email, "tester@example.com");
+        assert!(new_commit.refs.iter().any(|r| r.name == "lib-v2" && r.kind == RefKind::Tag));
+        let old_commit = change.old.unwrap();
+        assert_eq!(old_commit.message.trim(), "lib first");
+        // 旧コミットは先端ではないが、進んだ先のブランチに含まれる
+        assert!(old_commit.refs.iter().all(|r| r.kind != RefKind::Tag));
+        assert!(!old_commit.contained_in.is_empty());
+
+        let paths: Vec<&str> = change.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["lib.txt", "new.txt"]);
+        assert_eq!((change.files[0].additions, change.files[0].deletions), (1, 0));
+        assert_eq!(change.files[1].status, "A");
+        assert!(change.files[0].lines.iter().any(|l| l.kind == "add" && l.text == "two"));
+        assert!(!change.diff_truncated);
+        assert!(change.diff_error.is_none());
+    }
+
+    #[test]
+    fn submodule_change_for_an_added_submodule_has_no_old_side() {
+        let (dir, old, _) = build_submodule_fixture("submodule_added");
+        let repo = open(&dir).unwrap();
+        let added = git(&dir, &["rev-parse", "HEAD~1"]);
+        let change = submodule_change(&repo, &added, "vendor/lib", None, &|| false).unwrap();
+        assert_eq!(change.old_oid, None);
+        assert_eq!(change.new_oid.as_deref(), Some(old.as_str()));
+        assert!(change.old.is_none());
+        assert_eq!(change.new.unwrap().message.trim(), "lib first");
+        // 足された時は差分 (= サブモジュールの全ファイル) もコミット一覧 (= 全履歴) も出さない
+        assert!(change.commits.is_empty() && change.files.is_empty());
+    }
+
+    #[test]
+    fn submodule_change_falls_back_to_hashes_without_a_checkout() {
+        let (dir, old, new) = build_submodule_fixture("submodule_bare");
+        // サブモジュールを init していない clone
+        let clone = temp_repo("submodule_clone");
+        git(&clone, &["clone", "-q", dir.to_str().unwrap(), "."]);
+        let repo = open(&clone).unwrap();
+        let head = git(&clone, &["rev-parse", "HEAD"]);
+        let change = submodule_change(&repo, &head, "vendor/lib", None, &|| false).unwrap();
+        assert_eq!(change.old_oid.as_deref(), Some(old.as_str()));
+        assert_eq!(change.new_oid.as_deref(), Some(new.as_str()));
+        assert!(change.repo_path.is_none());
+        assert!(change.old.is_none() && change.new.is_none());
+        assert!(change.files.is_empty());
+    }
+
+    #[test]
+    fn submodule_change_rejects_ordinary_files() {
+        let dir = build_fixture("submodule_plain");
+        let repo = open(&dir).unwrap();
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        assert!(submodule_change(&repo, &head, "a.txt", None, &|| false).is_err());
+        assert!(!commit_detail(&repo, &head).unwrap().files.iter().any(|f| f.submodule));
+    }
+
+    #[test]
+    fn submodule_name_is_read_from_gitmodules() {
+        let text = "[submodule \"libs/renamed\"]\n\tpath = vendor/lib\n\turl = ../lib.git\n[submodule \"other\"]\n  path=other/dir\n";
+        assert_eq!(submodule_name(text, "vendor/lib").as_deref(), Some("libs/renamed"));
+        assert_eq!(submodule_name(text, "other/dir").as_deref(), Some("other"));
+        assert_eq!(submodule_name(text, "missing"), None);
+        // git の設定ファイルの書き方: 行末のコメント、引用符、エスケープ、大文字のキー
+        let text = "[submodule \"a \\\"b\\\"\"] ; note\n\tPath = \"dir with space\" # here\n[core]\n\tpath = x\n[submodule \"c\"]\n\tpath = plain ; trailing\n";
+        assert_eq!(submodule_name(text, "dir with space").as_deref(), Some("a \"b\""));
+        assert_eq!(submodule_name(text, "plain").as_deref(), Some("c"));
+        assert_eq!(submodule_name(text, "x"), None);
+        assert_eq!(config_value(" a\\tb  "), "a\tb");
+        assert_eq!(config_value("\"keep  \"  "), "keep  ");
+    }
+
+    #[test]
+    fn submodule_paths_must_stay_inside_the_repository() {
+        assert!(is_plain_relative("vendor/lib"));
+        for path in ["", "../lib", "vendor/../../lib", "/etc", "./lib"] {
+            assert!(!is_plain_relative(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_removed_submodule_is_read_from_the_module_cache() {
+        let (dir, _, new) = build_submodule_fixture("submodule_removed");
+        // 名前とパスが違う状態にしてから消す。.git/modules は名前 (vendor/lib) のまま残る
+        git(&dir, &["mv", "vendor/lib", "third_party"]);
+        git(&dir, &["commit", "-q", "-m", "move submodule"]);
+        git(&dir, &["rm", "-q", "third_party"]);
+        git(&dir, &["commit", "-q", "-m", "remove submodule"]);
+        let repo = open(&dir).unwrap();
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let change = submodule_change(&repo, &head, "third_party", None, &|| false).unwrap();
+        assert_eq!(change.old_oid.as_deref(), Some(new.as_str()));
+        assert_eq!(change.new_oid, None);
+        assert_eq!(change.old.unwrap().message.trim(), "lib third");
+        // 開く先は git dir そのもの。推測された作業ツリー (= 親リポジトリの中) にしない
+        let location = submodule_location(&repo, &head, "third_party", None).unwrap();
+        assert!(location.ends_with("modules/vendor/lib"), "{}", location.display());
+        assert_eq!(change.repo_path.as_deref(), location.to_str());
+        // 新しいウインドウは、その場所を普通の入口 (open) で開く。core.worktree は消えた third_party を指したまま
+        let reopened = open(&location).unwrap();
+        assert_eq!(display_path(&reopened), location);
+        let graph = load_graph(&reopened, true).unwrap();
+        assert_eq!(graph.rows[0].summary, "lib third");
+        assert!(reopen(reopened.path()).is_ok());
+    }
+
+    #[test]
+    fn submodule_change_stops_when_asked() {
+        let (dir, _, _) = build_submodule_fixture("submodule_stop");
+        let repo = open(&dir).unwrap();
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            submodule_change(&repo, &head, "vendor/lib", None, &|| true).unwrap_err(),
+            "Cancelled"
+        );
     }
 }

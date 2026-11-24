@@ -16,6 +16,9 @@ Website: https://www.cyberneura.com/app/dagscape
   with 100k+ commits scroll smoothly.
 - Commit details: message, author / committer, parents (click to jump), changed files with
   +/- counts, unified diff per file. Renames are detected.
+- A submodule update shows what moved inside the submodule, not just two hashes: both commits
+  (date, author, committer, branches, tags, message), the commits in between and the diff. The
+  submodule opens in a new window with one click.
 - Sidebar with branches, remotes and tags; click to jump to that commit.
 - Search by subject, author, hash prefix or ref name, with Enter / Shift+Enter to step through hits.
 - Reloads automatically when `.git/HEAD`, `packed-refs` or anything under `refs/` changes.

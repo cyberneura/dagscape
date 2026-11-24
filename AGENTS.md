@@ -26,6 +26,8 @@ dagscape/
 │       ├── CommitDetail.svelte    # Commit header, file list, unified diff
 │       ├── FilePreview.svelte     # Above the diff: size, added / modified dates, media preview
 │       ├── filePreview.ts         # Extension → preview kind / MIME type, byte formatting
+│       ├── SubmoduleDetail.svelte # Below a submodule's pointer diff: both commits, the commits between, the diff
+│       ├── diffStyle.ts           # Tailwind classes shared by the diffs (status letter, line kind, ref chip)
 │       └── RefSidebar.svelte      # Branches / remotes / tags
 └── src-tauri/src/
     ├── lib.rs                     # Tauri commands, app state (one open repository), menu
@@ -70,6 +72,21 @@ All rows live in the Rust side (`AppState.session.graph`); the webview keeps at 
   `side` = `new` (this commit) or `old` (first parent), capped at 64 MiB. The front wraps them in a
   Blob URL with the MIME type from `filePreview.ts` and shows images (before / after), video,
   audio and PDF; SVG goes through `<img>` so its scripts do not run
+- `get_submodule_change(oid, path, old_path?)` → `SubmoduleChange` for a file whose `FileChange.submodule`
+  is true (a gitlink): the old / new commit inside the submodule (author, committer, message, refs
+  pointing at it, branches containing it), the commits gained (≤ 200), ahead / behind, and the tree
+  diff per file (≤ 20k lines / 4 MiB / 2k files in total). Runs on a blocking thread with its own
+  `Repository` and a ticket like `get_file_info`, so a newer request stops an older one. The submodule
+  is opened from the work tree (only if the path resolves inside it), else from
+  `<git dir>/modules/<name>` with the name taken from that commit's `.gitmodules` (the name differs
+  from the path after `git mv`). Without a repository (`repo_path: null`) or without the commit
+  (`old` / `new: null`) only the hashes come back; an added or removed submodule gets the one commit
+  and no diff (that would be the whole tree)
+- `open_submodule_window(oid, path, old_path?)` → starts another Dagscape process on that submodule
+  (`cli::launch_app`, the same way the `dagscape` command does; one process holds one repository).
+  It takes the commit and path, not a filesystem path: the location is resolved again from the open
+  repository, and only the main window may call it. A submodule that only exists in the module cache
+  is opened by its git dir (after `deinit`, libgit2 would guess the superproject as its work tree)
 - `search_commits(query)` → row indices
 - `row_index_of(oid)` → index or null
 - `initial_path()` → the CLI argument, once
@@ -93,6 +110,12 @@ Events emitted to the webview: `repo-changed` (watcher), `menu` (payload: `open-
   props of `CommitDetail`, so the shell owns the store and the component owns the drag.
   `headerHeight` is `null` until the separator is first moved (and again after a double-click on it):
   the header then fits its content with the message capped at `max-h-40`, as before it was resizable.
+- The commit header shows `Committed at` (the **committer** date) and `Parents` on the left, `Author`
+  and `Committer` on the right — two label / value pairs per row from 36rem of pane width (a
+  container query; one pair per row below that). Author and committer dates are separate fields in
+  Git and differ after a rebase, cherry-pick or amend, so when they differ the author date stays
+  visible as `· authored <date>` next to the author instead of being dropped. The second pair's
+  label has `pl-8` so it does not read as the end of the first pair's value.
 - File paths in the detail's file list truncate at the *start* (`.truncate-start` in `app.css`:
   outer box `direction: rtl`, inner span isolated back to `ltr`), because the tail is what tells
   files apart.
