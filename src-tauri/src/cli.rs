@@ -125,7 +125,8 @@ fn resolve_path(path: Option<&str>) -> Result<PathBuf, String> {
     std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))
 }
 
-fn launch_app(path: &Path) -> Result<(), String> {
+/// path を開いた新しいアプリのプロセスを起動する (`dagscape` コマンドと、サブモジュールを新しいウインドウで開く操作)
+pub fn launch_app(path: &Path) -> Result<(), String> {
     let executable = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|e| format!("Failed to locate the application: {e}"))?;

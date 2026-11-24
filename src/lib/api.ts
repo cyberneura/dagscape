@@ -82,6 +82,8 @@ export interface FileChange {
   additions: number;
   deletions: number;
   binary: boolean;
+  /** A submodule (gitlink): its diff is only the two "Subproject commit" lines. */
+  submodule: boolean;
 }
 
 export interface CommitDetail {
@@ -132,6 +134,63 @@ export interface FileInfo {
 
 export type BlobSideName = "new" | "old";
 
+export interface SubmoduleRef {
+  name: string;
+  kind: RefKind;
+}
+
+/** A commit inside the submodule: the one the superproject pointed at, or points at now. */
+export interface SubmoduleCommit {
+  oid: string;
+  short: string;
+  author: Signature;
+  committer: Signature;
+  message: string;
+  /** Branches and tags that point at this very commit. */
+  refs: SubmoduleRef[];
+  /** Branches that have it in their history without pointing at it (capped). */
+  contained_in: string[];
+  contained_in_truncated: boolean;
+}
+
+export interface SubmoduleLogEntry {
+  oid: string;
+  short: string;
+  summary: string;
+  author: string;
+  time: number;
+}
+
+export interface SubmoduleFile {
+  path: string;
+  old_path: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  lines: DiffLine[];
+}
+
+export interface SubmoduleChange {
+  /** Recorded by the superproject; old is null when the submodule was added, new when removed. */
+  old_oid: string | null;
+  new_oid: string | null;
+  /** Where the submodule's repository is; null when it is not checked out (everything below is then empty). */
+  repo_path: string | null;
+  /** null when the commit is not in the submodule's repository (not fetched). */
+  old: SubmoduleCommit | null;
+  new: SubmoduleCommit | null;
+  ahead: number | null;
+  behind: number | null;
+  /** Commits gained from old to new, newest first (capped). */
+  commits: SubmoduleLogEntry[];
+  commits_truncated: boolean;
+  /** Diff between the two commits' trees, when both are present. */
+  files: SubmoduleFile[];
+  diff_truncated: boolean;
+  diff_error: string | null;
+}
+
 export const api = {
   openRepo: (path: string, includeRemotes: boolean) =>
     invoke<RepoSummary>("open_repo", { path, includeRemotes }),
@@ -147,6 +206,11 @@ export const api = {
   /** Raw bytes (an ArrayBuffer over IPC, not a JSON array). */
   getBlob: (oid: string, path: string, oldPath: string | null, side: BlobSideName) =>
     invoke<ArrayBuffer>("get_blob", { oid, path, oldPath, side }),
+  getSubmoduleChange: (oid: string, path: string, oldPath: string | null) =>
+    invoke<SubmoduleChange>("get_submodule_change", { oid, path, oldPath }),
+  /** Starts another Dagscape process on the submodule that commit `oid` moved at `path`. */
+  openSubmoduleWindow: (oid: string, path: string, oldPath: string | null) =>
+    invoke<void>("open_submodule_window", { oid, path, oldPath }),
   searchCommits: (query: string) => invoke<number[]>("search_commits", { query }),
   rowIndexOf: (oid: string) => invoke<number | null>("row_index_of", { oid }),
   initialPath: () => invoke<string | null>("initial_path"),
