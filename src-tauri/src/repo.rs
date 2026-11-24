@@ -142,7 +142,23 @@ const MAX_DIFF_LINES: usize = 50_000;
 const MAX_SEARCH_HITS: usize = 20_000;
 
 pub fn open(path: &Path) -> Result<Repository, String> {
-    Repository::discover(path).map_err(|e| format!("Not a git repository: {} ({})", path.display(), e.message()))
+    Repository::discover(path)
+        .or_else(|e| open_without_worktree(path).ok_or(e))
+        .map_err(|e| format!("Not a git repository: {} ({})", path.display(), e.message()))
+}
+
+/// 開いているリポジトリを、別スレッド用にもう 1 つのハンドルで開き直す。git_dir は `Repository::path()`
+pub fn reopen(git_dir: &Path) -> Result<Repository, String> {
+    Repository::open(git_dir)
+        .or_else(|e| open_without_worktree(git_dir).ok_or(e))
+        .map_err(|e| e.message().to_string())
+}
+
+/// 消されたサブモジュールが .git/modules に残したリポジトリは、core.worktree が無くなった作業ツリーを
+/// 指したままで、libgit2 は普通には開けない (作業ツリーの解決で失敗する)。履歴は読めるので、
+/// git dir そのものを渡された時に限り、作業ツリー無しで開く
+fn open_without_worktree(git_dir: &Path) -> Option<Repository> {
+    Repository::open_bare(git_dir).ok()
 }
 
 /// 表示用のパス。作業ツリーがあればその親、bare なら .git 自体。
@@ -1632,6 +1648,12 @@ mod tests {
         let location = submodule_location(&repo, &head, "third_party", None).unwrap();
         assert!(location.ends_with("modules/vendor/lib"), "{}", location.display());
         assert_eq!(change.repo_path.as_deref(), location.to_str());
+        // 新しいウインドウは、その場所を普通の入口 (open) で開く。core.worktree は消えた third_party を指したまま
+        let reopened = open(&location).unwrap();
+        assert_eq!(display_path(&reopened), location);
+        let graph = load_graph(&reopened, true).unwrap();
+        assert_eq!(graph.rows[0].summary, "lib third");
+        assert!(reopen(reopened.path()).is_ok());
     }
 
     #[test]

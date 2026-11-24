@@ -165,7 +165,7 @@ async fn get_file_info(
     let latest = state.file_info_ticket.clone();
     let ticket = latest.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || {
-        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        let repo = repo::reopen(&git_dir)?;
         let superseded = || latest.load(Ordering::SeqCst) != ticket;
         repo::file_info(&repo, &oid, &path, old_path.as_deref(), &superseded)
     })
@@ -191,7 +191,7 @@ async fn get_blob(
 ) -> Result<tauri::ipc::Response, String> {
     let git_dir = session_git_dir(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        let repo = repo::reopen(&git_dir)?;
         repo::blob_bytes(&repo, &oid, &path, old_path.as_deref(), &side)
     })
     .await
@@ -213,7 +213,7 @@ async fn get_submodule_change(
     let latest = state.submodule_ticket.clone();
     let ticket = latest.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || {
-        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        let repo = repo::reopen(&git_dir)?;
         let superseded = || latest.load(Ordering::SeqCst) != ticket;
         repo::submodule_change(&repo, &oid, &path, old_path.as_deref(), &superseded)
     })
@@ -238,7 +238,7 @@ async fn open_submodule_window(
     }
     let git_dir = session_git_dir(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let repo = git2::Repository::open(&git_dir).map_err(|e| e.message().to_string())?;
+        let repo = repo::reopen(&git_dir)?;
         let location = repo::submodule_location(&repo, &oid, &path, old_path.as_deref())?;
         cli::launch_app(&location)
     })
